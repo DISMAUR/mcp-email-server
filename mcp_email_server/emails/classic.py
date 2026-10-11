@@ -52,6 +52,7 @@ from mcp_email_server.application.mutations import (
     BatchMutationOutcome,
     DeliveryMutationOutcome,
     FlagOperation,
+    MailboxCreationStatus,
     MutableEmailFlag,
     MutationStatus,
     SentCopyMutationOutcome,
@@ -722,6 +723,16 @@ def _imap_effect_status(response: Any) -> MutationStatus:
     if status in {"NO", "BAD"}:
         return "failed"
     return "unknown"
+
+
+def _has_already_exists_code(response: Any) -> bool:
+    """Detect the RFC 5530 ALREADYEXISTS response code without exposing server text."""
+    lines = response[1] if isinstance(response, tuple | list) and len(response) > 1 else getattr(response, "lines", ())
+    for line in lines or ():
+        text = line.decode("utf-8", "replace") if isinstance(line, bytes | bytearray) else str(line)
+        if text.lstrip().upper().startswith("[ALREADYEXISTS]"):
+            return True
+    return False
 
 
 async def _best_effort_imap_logout(imap: Any) -> None:
@@ -3805,6 +3816,53 @@ class EmailClient:
                 logger.info("IMAP logout failed")
 
         return mailboxes
+
+    async def create_mailbox(self, mailbox: str) -> MailboxCreationStatus:
+        """Create one mailbox by exact name; report existence instead of failing.
+
+        The LIST existence check and CREATE share one session so the reported
+        status reflects a single provider view. Once CREATE may have reached the
+        server, interruption is ``unknown`` and is never replayed here.
+        """
+        imap = await self._connect_imap()
+        try:
+            await _imap_login(imap, self.email_server.user_name, self.email_server.password.get_secret_value())
+            await _send_imap_id(imap)
+            quoted = _quote_mailbox(mailbox)
+            # An empty LIST pattern discovers the reference namespace's delimiter
+            # even when the requested mailbox does not exist (RFC 3501 6.3.8).
+            hierarchy = await imap.list(quoted, '""')  # pyright: ignore[reportArgumentType]
+            _raise_for_imap_error(hierarchy, "LIST mailbox hierarchy before CREATE")
+            roots = _parse_list_responses(hierarchy[1])
+            if len(roots) != 1:
+                raise RuntimeError("LIST mailbox hierarchy returned no unique delimiter")
+            delimiter = roots[0].delimiter
+            if delimiter and mailbox.endswith(delimiter):
+                raise ValueError("mailbox must not end with the server's hierarchy delimiter")
+            response = await imap.list('""', quoted)  # pyright: ignore[reportArgumentType]
+            _raise_for_imap_error(response, "LIST mailbox before CREATE")
+            for existing in _parse_list_responses(response[1]):
+                # \Noselect/\NonExistent entries are hierarchy placeholders, not
+                # mailboxes; CREATE is what turns them into real ones.
+                if any(flag.casefold() in (r"\noselect", r"\nonexistent") for flag in existing.flags):
+                    continue
+                if existing.name == mailbox or existing.name.casefold() == "inbox" == mailbox.casefold():
+                    return "already_exists"
+            self._check_mutation_authority()
+            try:
+                created = await imap.create(quoted)
+            except Exception:
+                return "unknown"
+            status = _imap_effect_status(created)
+            if status == "succeeded":
+                return "created"
+            if status == "failed":
+                if _has_already_exists_code(created):
+                    return "already_exists"
+                raise RuntimeError(f"CREATE mailbox failed ({_imap_status(created)})")
+            return "unknown"
+        finally:
+            await _best_effort_imap_logout(imap)
 
 
 class ClassicEmailHandler(EmailHandler):
