@@ -4,12 +4,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from importlib.metadata import version
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import anyio
 from mcp.server.fastmcp import FastMCP
-from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, ToolAnnotations
-from pydantic import Field
+from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, TextContent, ToolAnnotations
+from pydantic import Field, ValidationError
 
 from mcp_email_server.application.accounts import AvailableAccount, EffectiveConfiguration
 from mcp_email_server.application.limits import APPLICATION_LIMITS, validate_serialized_result
@@ -37,6 +37,15 @@ from mcp_email_server.application.mutations import (
     SetEmailFlagsCommand,
     SetEmailTagsCommand,
     TargetMutationOutcome,
+)
+from mcp_email_server.application.protocol import (
+    ProtocolCommand,
+    ProtocolFailure,
+    ProtocolRequest,
+    ProtocolResult,
+    ProtocolStep,
+    local_help,
+    parse_commands,
 )
 from mcp_email_server.application.reads import (
     DownloadAttachmentCommand,
@@ -245,7 +254,59 @@ async def _application_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, obj
             await close_application_runtime()
 
 
-mcp = FastMCP("email", lifespan=_application_lifespan)
+def _protocol_tool_result(result: ProtocolResult) -> CallToolResult:
+    return CallToolResult(
+        isError=result.status != "completed",
+        content=[TextContent(type="text", text=result.model_dump_json())],
+        structuredContent=result.model_dump(mode="json"),
+    )
+
+
+async def _execute_protocol_request(request: ProtocolRequest) -> CallToolResult:
+    try:
+        parsed = parse_commands(request)
+        if parsed[0].name == "HELP":
+            return _protocol_tool_result(local_help(request.protocol, parsed[0]))
+    except (ProtocolFailure, UnicodeError) as exc:
+        return _protocol_tool_result(
+            ProtocolResult(
+                results=[ProtocolStep(index=index) for index in range(len(request.commands))],
+                error=str(exc) if isinstance(exc, ProtocolFailure) else "invalid_input: invalid Unicode",
+            )
+        )
+    service = get_application_runtime().protocol_commands
+    if service is None:
+        return _protocol_tool_result(ProtocolResult(error="protocol_unavailable: execution service is unavailable"))
+    return _protocol_tool_result(await service.execute(request))
+
+
+class EmailMCP(FastMCP):
+    """Keep legacy coercion unchanged; raw protocol input must be lossless and strict."""
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        for tool in tools:
+            if tool.name == "email_command":
+                tool.inputSchema = ProtocolRequest.model_json_schema()
+                tool.outputSchema = ProtocolResult.model_json_schema()
+        return tools
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):  # pyright: ignore[reportIncompatibleMethodOverride] - MCP supports CallToolResult, SDK annotation omits it
+        if name != "email_command":
+            return await super().call_tool(name, arguments)
+        try:
+            request = ProtocolRequest.model_validate(arguments)
+        except ValidationError:
+            # SDK validation errors include original input. Never echo message data.
+            return _protocol_tool_result(
+                ProtocolResult(
+                    error='invalid_input: use the email_command schema; call commands=[{"command":"HELP"}] for examples'
+                )
+            )
+        return await _execute_protocol_request(request)
+
+
+mcp = EmailMCP("email", lifespan=_application_lifespan)
 # FastMCP 1.x does not expose its low-level server version in the constructor.
 mcp._mcp_server.version = version("mcp-email-server")  # pyright: ignore[reportPrivateUsage]
 
@@ -1382,4 +1443,30 @@ async def download_attachment(
             save_path=save_path,
             mailbox=mailbox,
         )
+    )
+
+
+@mcp.tool(
+    description=(
+        "Execute IMAP or SMTP primitives when a focused email tool does not cover the operation. "
+        "Existing tools, including create_mailbox, remain the simpler policy-aware route. "
+        'Start with commands=[{"command":"HELP"}] or HELP UID COPY for local syntax and examples; no account is needed for help. '
+        "Execution requires account_name and user-enabled allow_protocol_commands with compatible policy. "
+        "Commands run in order on one automatically authenticated connection; state lasts only for this call. "
+        "For example SELECT a mailbox, then UID COPY known UIDs to an existing destination. "
+        "Put APPEND/DATA message content in data, never in command lines. No login commands, passwords, hosts, "
+        "shell scripts or local paths. Stops on the first error. Inspect every result: prior effects may exist "
+        "and unknown completion must not be replayed automatically. HELP lists supported syntax; server "
+        "CAPABILITY alone does not imply client support for arbitrary extensions."
+    ),
+    annotations=_DESTRUCTIVE_REMOTE_MUTATION,
+)
+async def email_command(
+    commands: Annotated[list[ProtocolCommand], Field(min_length=1, max_length=20)],
+    account_name: str | None = None,
+    protocol: Literal["imap", "smtp"] = "imap",
+) -> CallToolResult:
+    """The MCP boundary bypasses SDK string coercion only for this tool."""
+    return await _execute_protocol_request(
+        ProtocolRequest(account_name=account_name, protocol=protocol, commands=commands)
     )

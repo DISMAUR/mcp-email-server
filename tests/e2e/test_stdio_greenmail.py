@@ -1731,3 +1731,93 @@ async def test_current_stdio_server_against_greenmail(tmp_path: Path) -> None:
             mailboxes = await _call_tool(session, "list_mailboxes", {"account_name": "alice"})
             mailbox_names = {mailbox["name"] for mailbox in mailboxes["result"]}
             assert {"INBOX", "Sent", "Drafts", "Archive"} <= mailbox_names
+
+
+@pytest.mark.asyncio
+async def test_protocol_primitives_over_stdio_against_greenmail(tmp_path: Path) -> None:
+    """A real COPY has no copy business service; existing focused tools coexist."""
+    _wait_until_ready()
+    subject = f"protocol-{uuid.uuid4().hex}"
+    destination = f"Protocol-{uuid.uuid4().hex[:8]}"
+    renamed = destination + "-Renamed"
+    _seed_message_as(BOB, ALICE[0], subject, "Synthetic protocol source")
+    source = _wait_for_message(ALICE, "INBOX", subject)
+    config = CONFIG_TEMPLATE.replace(
+        'account_name = "alice"\n', 'account_name = "alice"\nallow_protocol_commands = true\n'
+    ).replace('allowed_recipients = ["bob@example.test"]', 'allowed_recipients = ["*"]')
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(config)
+    config_path.chmod(0o600)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("MCP_EMAIL_SERVER_")}
+    env.update({"MCP_EMAIL_SERVER_CONFIG_PATH": str(config_path), "MCP_EMAIL_SERVER_LOG_LEVEL": "DEBUG"})
+    server = StdioServerParameters(
+        command=str(Path(sys.executable).with_name("mcp-email-server")), args=["stdio"], env=env, cwd=Path.cwd()
+    )
+    async with stdio_client(server) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=15)) as session:
+            await session.initialize()
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            assert len(tools) == 21
+            assert "create_mailbox" in tools and "email_command" in tools
+            help_result = await _call_tool(session, "email_command", {"commands": [{"command": "HELP UID COPY"}]})
+            assert help_result["results"][0]["code"] == "HELP"
+            await _call_tool(session, "create_mailbox", {"account_name": "alice", "mailbox": destination})
+            await _metadata_for_subject(session, "alice", subject)
+            copied = await _call_tool(
+                session,
+                "email_command",
+                {
+                    "account_name": "alice",
+                    "commands": [
+                        {"command": 'SELECT "INBOX"'},
+                        {"command": f'UID COPY {source.uid} "{destination}"'},
+                        {"command": f'RENAME "{destination}" "{renamed}"'},
+                        {"command": f'SUBSCRIBE "{renamed}"'},
+                    ],
+                },
+            )
+            assert copied["status"] == "completed"
+            assert [step["code"] for step in copied["results"]] == ["OK"] * 4
+            assert _wait_for_message(ALICE, "INBOX", subject).uid == source.uid
+            _wait_for_message(ALICE, renamed, subject)
+            independent = await session.call_tool(
+                "email_command", {"account_name": "alice", "commands": [{"command": f"UID COPY {source.uid} INBOX"}]}
+            )
+            assert independent.isError and independent.structuredContent["results"][0]["status"] == "error"
+            refused = await session.call_tool(
+                "email_command", {"account_name": "bob", "commands": [{"command": "NOOP"}]}
+            )
+            assert refused.isError and "protocol_disabled" in _text_content(refused)
+            data = f"From: {ALICE[0]}\r\nTo: {BOB[0]}\r\nSubject: append-{subject}\r\n\r\nProtocol body.\r\n"
+            await _call_tool(
+                session,
+                "email_command",
+                {"account_name": "alice", "commands": [{"command": f'APPEND "{renamed}"', "data": data}]},
+            )
+            appended = _wait_for_message(ALICE, renamed, f"append-{subject}")
+            fetched = await _call_tool(
+                session,
+                "email_command",
+                {
+                    "account_name": "alice",
+                    "commands": [
+                        {"command": f'EXAMINE "{renamed}"'},
+                        {"command": f"UID FETCH {appended.uid} (BODY.PEEK[])"},
+                    ],
+                },
+            )
+            assert any(block["kind"] == "literal" for block in fetched["results"][1]["responses"])
+            await _call_tool(
+                session,
+                "email_command",
+                {
+                    "account_name": "alice",
+                    "protocol": "smtp",
+                    "commands": [
+                        {"command": f"MAIL FROM:<{ALICE[0]}>"},
+                        {"command": f"RCPT TO:<{BOB[0]}>"},
+                        {"command": "DATA", "data": data.replace("append-", "smtp-", 1)},
+                    ],
+                },
+            )
+            _wait_for_message(BOB, "INBOX", f"smtp-{subject}")

@@ -376,6 +376,7 @@ def _legacy_import_plan_data(plan: LegacyImportPlan) -> dict[str, object]:
                 "tags": [_tag_data(tag) for tag in source.tags],
                 "allowed_mutations": list(source.allowed_mutations) if source.allowed_mutations is not None else None,
                 "drafts_mailbox": source.drafts_mailbox,
+                "allow_protocol_commands": source.allow_protocol_commands,
             },
             "incoming": {
                 **_endpoint_data(source.incoming),
@@ -704,6 +705,7 @@ def _echo_legacy_import_plan(plan: LegacyImportPlan) -> None:
             f"  identity={source.email_address} full_name={source.full_name!r} "
             f"save_to_sent={str(source.save_to_sent).lower()} sent_folder={source.sent_folder_name or 'default'}"
         )
+        typer.echo(f"  allow_protocol_commands={str(source.allow_protocol_commands).lower()}")
         typer.echo(f"  tags={json.dumps([_tag_data(tag) for tag in source.tags], separators=(',', ':'))}")
         incoming = source.incoming
         typer.echo(
@@ -823,6 +825,11 @@ def account_add(
         help="Read secret lines from user-controlled stdin; never place credentials in argv.",
     ),
     save_to_sent: bool = typer.Option(True, "--save-to-sent/--no-save-to-sent"),
+    allow_protocol_commands: bool = typer.Option(
+        False,
+        "--allow-protocol-commands/--no-allow-protocol-commands",
+        help="Advanced raw protocol access, including mailbox deletion, expunge and arbitrary flags. Requires compatible policy.",
+    ),
     allowed_mutations: str | None = typer.Option(
         None, "--allowed-mutations", help="Comma-separated grants; empty read-only; inherit resets to global."
     ),
@@ -901,6 +908,7 @@ def account_add(
                 if allowed_mutations in (None, "inherit")
                 else parse_mutations(_split_csv(allowed_mutations)),
                 drafts_mailbox=drafts_mailbox or None,
+                allow_protocol_commands=allow_protocol_commands,
             )
         )
     except (ManagementError, ValueError) as exc:
@@ -1042,6 +1050,7 @@ def account_show(name: str, json_output: JsonOutput = False) -> None:
                 "sent_folder_name": account.sent_folder_name,
                 "allowed_mutations": list(account.allowed_mutations) if account.allowed_mutations is not None else None,
                 "drafts_mailbox": account.drafts_mailbox,
+                "allow_protocol_commands": account.allow_protocol_commands,
                 "incoming": _endpoint_data(account.incoming),
                 "outgoing": _endpoint_data(account.outgoing) if account.outgoing is not None else None,
                 "incoming_binding": account.incoming_binding,
@@ -1056,6 +1065,7 @@ def account_show(name: str, json_output: JsonOutput = False) -> None:
     typer.echo(f"enabled={str(account.enabled).lower()}")
     typer.echo(f"revision={account.revision}")
     typer.echo(f"save_to_sent={str(account.save_to_sent).lower()}")
+    typer.echo(f"allow_protocol_commands={str(account.allow_protocol_commands).lower()}")
     typer.echo(f"sent_folder={account.sent_folder_name or 'default'}")
     typer.echo(f"tags={json.dumps([_tag_data(tag) for tag in account.tags], separators=(',', ':'))}")
     typer.echo(f"incoming_host={account.incoming.host}")
@@ -1096,6 +1106,11 @@ def account_update(
     smtp_verify_ssl: bool | None = typer.Option(None, "--smtp-verify-ssl/--no-smtp-verify-ssl"),
     remove_outgoing: bool = typer.Option(False, "--remove-outgoing"),
     save_to_sent: bool | None = typer.Option(None, "--save-to-sent/--no-save-to-sent"),
+    allow_protocol_commands: bool | None = typer.Option(
+        None,
+        "--allow-protocol-commands/--no-allow-protocol-commands",
+        help="Advanced raw protocol access, including mailbox deletion, expunge and arbitrary flags. Requires compatible policy.",
+    ),
     allowed_mutations: str | None = typer.Option(
         None, "--allowed-mutations", help="Comma-separated grants; empty read-only; inherit resets to global."
     ),
@@ -1140,6 +1155,7 @@ def account_update(
                 if allowed_mutations in (None, "inherit")
                 else parse_mutations(_split_csv(allowed_mutations)),
                 drafts_mailbox=drafts_mailbox or None,
+                allow_protocol_commands=allow_protocol_commands,
                 update_allowed_mutations=allowed_mutations is not None,
                 update_drafts_mailbox=drafts_mailbox is not None,
                 update_sent_folder=sent_folder is not None or clear_sent_folder,

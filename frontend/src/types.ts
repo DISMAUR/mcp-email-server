@@ -59,6 +59,7 @@ export interface AccountTag {
 export interface AccountSummary {
   allowed_mutations?: MutationClass[] | null
   drafts_mailbox?: string | null
+  allow_protocol_commands?: boolean
   name: string
   email_address: string
   enabled: boolean
@@ -80,6 +81,7 @@ export interface AccountDetails extends AccountSummary {
 export interface AccountInput {
   allowed_mutations?: MutationClass[] | null
   drafts_mailbox?: string | null
+  allow_protocol_commands?: boolean
   name: string
   full_name: string
   email_address: string
@@ -112,6 +114,7 @@ export interface LegacyAccountSource {
   incoming_secret_source: 'plaintext' | 'keyring' | 'environment'
   outgoing: Endpoint | null
   outgoing_secret_source: 'plaintext' | 'keyring' | 'environment' | null
+  allow_protocol_commands?: boolean
   save_to_sent: boolean
   sent_folder_name: string | null
 }

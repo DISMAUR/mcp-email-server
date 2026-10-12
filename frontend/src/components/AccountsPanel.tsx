@@ -91,6 +91,7 @@ const displayNameFromEmail = (emailAddress: string): string => {
 const blankAccount = (): AccountInput => ({
   allowed_mutations: null,
   drafts_mailbox: null,
+  allow_protocol_commands: false,
   name: '',
   full_name: '',
   email_address: '',
@@ -104,6 +105,7 @@ const blankAccount = (): AccountInput => ({
 const editableAccount = (current: AccountDetails): AccountInput => ({
   allowed_mutations: current.allowed_mutations ?? null,
   drafts_mailbox: current.drafts_mailbox ?? null,
+  allow_protocol_commands: current.allow_protocol_commands ?? false,
   name: current.name,
   full_name: current.full_name,
   email_address: current.email_address,
@@ -359,6 +361,8 @@ function AccountEditor({
         <div className="details-body">
           <label className="field-checkbox"><input type="checkbox" checked={input.allowed_mutations == null} onChange={(event) => update('allowed_mutations', event.target.checked ? null : [...globalGrants])} /> Inherit global mutation grants</label>
           <p className="hint">Permission source: {input.allowed_mutations == null ? 'Inherited from global policy' : 'Account override (replaces global grants)'}.</p>
+          <label className="field-checkbox"><input type="checkbox" checked={input.allow_protocol_commands ?? false} onChange={(event) => update('allow_protocol_commands', event.target.checked)} /> Allow advanced protocol commands</label>
+          <p className="hint">Allows raw mailbox deletion, expunge and arbitrary flags or keywords, without focused-tool safeguards. IMAP requires organize/delete/append grants, unrestricted senders and attachment-content access. SMTP requires send permission and an explicit * recipient policy. Disabled by default; never inherited.</p>
           <MutationGrants id="account-grants" value={input.allowed_mutations ?? globalGrants} disabled={input.allowed_mutations == null} onChange={(grants) => update('allowed_mutations', grants)} />
           <p className="hint">Effective permissions: {grantSummary(input.allowed_mutations ?? globalGrants)}.</p>
           <div className="field"><label htmlFor="drafts-mailbox">Drafts mailbox (optional)</label><input id="drafts-mailbox" value={input.drafts_mailbox ?? ''} onChange={(event) => update('drafts_mailbox', event.target.value || null)} maxLength={1000} /><small>Mailbox used by save_draft. Leave empty to discover a unique provider Drafts special-use mailbox; this does not grant draft permission.</small></div>

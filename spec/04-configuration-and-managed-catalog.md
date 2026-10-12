@@ -115,6 +115,34 @@ provider authentication, timeout, and transport failures retain their category.
 Endpoint port range and mutually exclusive implicit-TLS/STARTTLS modes are
 validated before CLI secret collection and again at the application boundary.
 
+## Explicit Protocol Command Access
+
+Each email account has `allow_protocol_commands: bool`, default false and never
+inherited from global mutation grants. Only user-operated configuration, CLI,
+or UI can set it; the MCP request cannot enable or override it. Persist and
+round-trip it through legacy configuration, managed accounts, import, and
+non-secret management DTOs. Existing accounts migrate with access disabled.
+
+Execution additionally requires current compatible effective policy:
+
+- IMAP: an incoming endpoint, organize/delete/append grants, no sender allowlist,
+  and attachment-content access enabled.
+- SMTP: an outgoing endpoint, send grant, and an explicit universal `*` recipient
+  pattern. An empty recipient allowlist denies rather than allows sending.
+
+An incompatible profile is rejected as a whole, even for an individually benign
+command. Never broaden settings automatically. Existing focused tools remain
+available under their normal fine-grained grants. Account disable/removal,
+endpoint/credential identity changes, and policy revocation stop further commands
+on an established connection. Resolve only the selected protocol's secret.
+
+Enabling the flag explicitly authorizes wider server-side protocol semantics,
+including mailbox deletion/expunge and arbitrary flag/keyword changes without
+semantic-tag restrictions. Explain this in CLI/UI and published security docs;
+this is not the same promise as using the existing focused tools. It does not
+authorize local files, host programs, credential management, or other endpoints.
+Spec 10 owns the MCP surface and spec 07 owns provider execution.
+
 ## Low-level Agent Management CLI
 
 The `config` and `account` command groups are the low-level agent management API.
@@ -387,6 +415,11 @@ provider connectivity. Results expose categories and remediation, never values,
 SQL, raw provider responses, or reusable locators.
 
 ## Acceptance Criteria
+
+- **04-P1:** Protocol access defaults off and survives TOML/environment composition, legacy
+  import, managed migration, CLI and UI create/update/readback. Omitted partial
+  updates preserve it; explicit false revokes it. Admission rejects incompatible
+  filters/grants before secret lookup, with no automatic policy broadening.
 
 - Omitted mutation settings preserve all five grants for new and old managed and
   legacy configurations; account null/omission inherits, explicit lists replace,

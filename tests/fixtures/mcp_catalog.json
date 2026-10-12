@@ -2097,6 +2097,189 @@
                 "idempotentHint": false,
                 "openWorldHint": true
             }
+        },
+        {
+            "name": "email_command",
+            "description": "Execute IMAP or SMTP primitives when a focused email tool does not cover the operation. Existing tools, including create_mailbox, remain the simpler policy-aware route. Start with commands=[{\"command\":\"HELP\"}] or HELP UID COPY for local syntax and examples; no account is needed for help. Execution requires account_name and user-enabled allow_protocol_commands with compatible policy. Commands run in order on one automatically authenticated connection; state lasts only for this call. For example SELECT a mailbox, then UID COPY known UIDs to an existing destination. Put APPEND/DATA message content in data, never in command lines. No login commands, passwords, hosts, shell scripts or local paths. Stops on the first error. Inspect every result: prior effects may exist and unknown completion must not be replayed automatically. HELP lists supported syntax; server CAPABILITY alone does not imply client support for arbitrary extensions.",
+            "inputSchema": {
+                "$defs": {
+                    "ProtocolCommand": {
+                        "additionalProperties": false,
+                        "properties": {
+                            "command": {
+                                "description": "One untagged command line, or local HELP. No CR/LF or literal markers.",
+                                "maxLength": 65536,
+                                "minLength": 1,
+                                "title": "Command",
+                                "type": "string"
+                            },
+                            "data": {
+                                "anyOf": [
+                                    {
+                                        "maxLength": 1048576,
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "description": "UTF-8 message content for IMAP APPEND or SMTP DATA only; framing is supplied by the server.",
+                                "title": "Data"
+                            }
+                        },
+                        "required": ["command"],
+                        "title": "ProtocolCommand",
+                        "type": "object"
+                    }
+                },
+                "additionalProperties": false,
+                "properties": {
+                    "account_name": {
+                        "anyOf": [
+                            {
+                                "maxLength": 256,
+                                "minLength": 1,
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Configured account name; required for execution, omitted for local HELP.",
+                        "title": "Account Name"
+                    },
+                    "protocol": {
+                        "default": "imap",
+                        "enum": ["imap", "smtp"],
+                        "title": "Protocol",
+                        "type": "string"
+                    },
+                    "commands": {
+                        "items": {
+                            "$ref": "#/$defs/ProtocolCommand"
+                        },
+                        "maxItems": 20,
+                        "minItems": 1,
+                        "title": "Commands",
+                        "type": "array"
+                    }
+                },
+                "required": ["commands"],
+                "title": "ProtocolRequest",
+                "type": "object"
+            },
+            "outputSchema": {
+                "$defs": {
+                    "ProtocolStep": {
+                        "properties": {
+                            "index": {
+                                "title": "Index",
+                                "type": "integer"
+                            },
+                            "status": {
+                                "default": "not_attempted",
+                                "enum": [
+                                    "ok",
+                                    "error",
+                                    "unknown",
+                                    "not_attempted"
+                                ],
+                                "title": "Status",
+                                "type": "string"
+                            },
+                            "code": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "title": "Code"
+                            },
+                            "responses": {
+                                "items": {
+                                    "$ref": "#/$defs/ResponseBlock"
+                                },
+                                "title": "Responses",
+                                "type": "array"
+                            }
+                        },
+                        "required": ["index"],
+                        "title": "ProtocolStep",
+                        "type": "object"
+                    },
+                    "ResponseBlock": {
+                        "properties": {
+                            "kind": {
+                                "default": "line",
+                                "enum": ["line", "literal"],
+                                "title": "Kind",
+                                "type": "string"
+                            },
+                            "encoding": {
+                                "default": "text",
+                                "enum": ["text", "base64"],
+                                "title": "Encoding",
+                                "type": "string"
+                            },
+                            "data": {
+                                "title": "Data",
+                                "type": "string"
+                            }
+                        },
+                        "required": ["data"],
+                        "title": "ResponseBlock",
+                        "type": "object"
+                    }
+                },
+                "properties": {
+                    "status": {
+                        "default": "stopped",
+                        "enum": ["completed", "stopped", "unknown"],
+                        "title": "Status",
+                        "type": "string"
+                    },
+                    "results": {
+                        "items": {
+                            "$ref": "#/$defs/ProtocolStep"
+                        },
+                        "title": "Results",
+                        "type": "array"
+                    },
+                    "error": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Error"
+                    },
+                    "warnings": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Warnings",
+                        "type": "array"
+                    }
+                },
+                "title": "ProtocolResult",
+                "type": "object"
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
         }
     ],
     "resources": [],

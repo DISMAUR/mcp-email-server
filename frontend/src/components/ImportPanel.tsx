@@ -81,6 +81,7 @@ export function ImportPanel({ api, onChanged }: { api: ManagementApi; onChanged?
               <article className="import-account" key={item.name}>
                 <div><h3>{item.source.email_address}</h3><p>{item.source.full_name}</p></div>
                 <span className={`status-pill${item.action === 'conflict' ? ' status-pill-attention' : ''}`}>{actionLabel(item.action)}</span>
+                {item.source.allow_protocol_commands ? <p className="warning">Advanced protocol commands are enabled in this source, including raw mailbox deletion and expunge. This permission will be copied.</p> : null}
                 <details className="inline-details">
                   <summary>Source details</summary>
                   <div className="details-body">

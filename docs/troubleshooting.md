@@ -15,6 +15,25 @@ MCP_EMAIL_SERVER_LOG_LEVEL=DEBUG mcp-email-server stdio
 
 Restart the server after changing configuration paths or environment variables.
 
+## Advanced protocol commands stop or are unavailable
+
+Call `email_command` with `commands=[{"command":"HELP"}]` without an account to
+inspect supported syntax locally. `protocol_disabled` means the account's
+user-operated opt-in is off; `policy_conflict` means the account's grants or
+sender/recipient/content policy is incompatible. Prefer an existing focused tool;
+do not ask the agent to change configuration or send credentials.
+
+`invalid_state` usually means SELECT/EXAMINE was missing from this call. Sessions
+are not retained between requests. Unsupported extensions or framing fail before
+any user command is sent. Server CAPABILITY does not promise executor support.
+
+On `stopped`, inspect each ordered result: earlier commands may already have
+succeeded. On `unknown`, verify remote state before deciding what to do; never
+replay the entire sequence automatically. Split large FETCH requests or use
+focused content/attachment tools when a receive or result limit is reached.
+A metadata-invalidation warning does not undo or disprove recorded remote
+success. See [protocol results](tools.md#access-scope-and-results).
+
 ## A mail write is denied by mutation policy
 
 Check global `allowed_mutations` and the account override. Omission/null on an
@@ -165,19 +184,19 @@ sidecar itself is unparseable, repair or restore that sidecar manually; `reset`
 cannot safely infer its mode and therefore does not unlink the independent legacy
 source.
 
-Schemas v3 and v4 are supported managed-catalog migration sources for v5.
+Schemas v3, v4, and v5 are supported managed-catalog migration sources for v6.
 The first new-version catalog access migrates transactionally, preserving account,
-policy, binding, secret rows, and revisions. Both sources receive full global
-mutation grants and inheriting account overrides; v3 also receives empty tag
-mappings and a disabled attachment-content policy. A failed migration leaves the
-source version intact.
+policy, binding, secret rows, and revisions. All sources receive disabled protocol
+access. Sources before v5 receive full global mutation grants and inheriting
+account overrides; v3 also receives empty tag mappings and a disabled
+attachment-content policy. A failed migration leaves the source version intact.
 
 An older MCP process will reject the catalog after another new-version UI, CLI,
 or MCP process migrates it. Upgrade all catalog users together and restart every
 MCP client. If rolling back the package, restore the consistent pre-migration
 catalog backup too; do not edit the schema version manually, delete the catalog,
 or re-enter all accounts as a routine upgrade fix. Follow the
-[managed upgrade and rollback steps](configuration.md#upgrading-a-managed-catalog-to-v5).
+[managed upgrade and rollback steps](configuration.md#upgrading-a-managed-catalog-to-v6).
 
 Other older development schemas are still rejected. For those versions, select
 legacy mode, preserve the old file for rollback, and initialize a fresh

@@ -367,6 +367,21 @@ class MetadataIndex:
         except (ManagedCatalogError, sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise MetadataIndexError("Indexed metadata is unavailable") from exc
 
+    def invalidate_account(self, operational_account_id: str) -> None:
+        """Invalidate coverage after raw protocol effects, retaining the projection."""
+        self.ensure_ready()
+        try:
+            with _connect(self.path) as connection:
+                connection.execute(
+                    """DELETE FROM index_coverage WHERE mailbox_id IN (
+                           SELECT id FROM mailbox_projection WHERE operational_account_id = ?
+                       )""",
+                    (operational_account_id,),
+                )
+                connection.commit()
+        except (ManagedCatalogError, sqlite3.Error) as exc:
+            raise MetadataIndexError("Metadata projection could not be invalidated") from exc
+
     def invalidate_mailboxes(self, operational_account_id: str, mailboxes: tuple[str, ...]) -> None:
         """Mark mailbox coverage stale without rewriting provider outcome evidence."""
         self.ensure_ready()

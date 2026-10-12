@@ -83,6 +83,7 @@ class CreateAccountRequest(CatalogTargetRequest):
     tags: tuple[ImapKeywordTag, ...] = ()
     allowed_mutations: tuple[MutationClass, ...] | None = None
     drafts_mailbox: str | None = Field(default=None, max_length=65535)
+    allow_protocol_commands: bool = False
 
     @model_validator(mode="after")
     def validate_outgoing_credential(self) -> CreateAccountRequest:
@@ -107,6 +108,7 @@ class UpdateAccountRequest(CatalogTargetRequest):
     tags: tuple[ImapKeywordTag, ...] = ()
     allowed_mutations: tuple[MutationClass, ...] | None = None
     drafts_mailbox: str | None = Field(default=None, max_length=65535)
+    allow_protocol_commands: bool | None = None
 
     def command(self, current_name: str, *, had_outgoing: bool) -> UpdateAccountCommand:
         return UpdateAccountCommand(
@@ -126,6 +128,7 @@ class UpdateAccountRequest(CatalogTargetRequest):
             tags=self.tags,
             allowed_mutations=self.allowed_mutations,
             drafts_mailbox=self.drafts_mailbox,
+            allow_protocol_commands=self.allow_protocol_commands,
         )
 
 

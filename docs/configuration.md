@@ -350,6 +350,42 @@ the server accepted the envelope sender, but not that it would accept a recipien
 or message body. Typed IMAP/SMTP authentication, sender rejection, and timeout
 failures retain the correct category.
 
+### Advanced protocol access
+
+`allow_protocol_commands` is a per-account boolean, **false by default**. In the
+UI, find **Allow advanced protocol commands** under **Account permissions**.
+It is separate from mutation grants and is never inherited from global policy.
+The same account field is available in legacy TOML and as
+`MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS` (default `false`) for the
+environment-composited account. Legacy import preserves the explicit value;
+the CLI preview displays it and the UI warns before copying enabled protocol access.
+
+Enable it only if you want the broader raw protocol semantics: mailbox deletion,
+expunge, arbitrary flags and keywords, and raw MIME access without focused-tool
+filtering, semantic tags or destination safeguards. Existing tools retain their
+current restrictions. The executor rejects incompatible profiles:
+
+| Protocol | Required in addition to the opt-in                                                                                            |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| IMAP     | Enabled incoming account; effective `organize`, `delete`, `append`; empty `allowed_senders`; `enable_attachment_content=true` |
+| SMTP     | Enabled outgoing account; effective `send`; explicit `*` in `allowed_recipients` (empty denies all)                           |
+
+The server never changes grants or filters to satisfy this gate. An organize-only
+account must use focused tools even for a raw read or COPY. MCP cannot enable
+this access. A user can enable or revoke it through the revision-checked CLI:
+
+```bash
+mcp-email-server account show personal --json
+mcp-email-server account update personal --expected-revision 3 --allow-protocol-commands
+# Use the revision returned by the update when revoking:
+mcp-email-server account update personal --expected-revision 4 --no-allow-protocol-commands
+```
+
+Use your actual current revision, not the illustrative numbers above. Omission
+on an update preserves the flag; new accounts and migrated accounts remain off.
+See [`email_command`](tools.md#email_command-advanced-protocol-operations) for
+local HELP, syntax, limits and completion semantics.
+
 ### Managed account lifecycle
 
 On Linux and Windows, `account add` and `account set-secret` insert the new value
@@ -484,19 +520,24 @@ Managed storage uses one exact current schema for account authority, the
 platform-selected secret binding, and the operational projection. On Linux and
 Windows, any copy, snapshot, or backup of this database includes plaintext values
 from `managed_secret`; protect every copy with private access equivalent to the
-original and never treat the catalog as a non-secret database. Schema v3 and v4
-catalogs migrate automatically to v5 on the first catalog access. The transaction
-preserves accounts, policy, bindings, secrets, and revisions; it adds all five
-global mutation grants, inheriting account overrides, and an unset draft
-mailbox. A v3 source also receives empty account tag mappings and the disabled
-attachment-content policy. Exact schema and invariant checks finish before v5
+original and never treat the catalog as a non-secret database. Schema v3, v4,
+and v5 catalogs migrate automatically to v6 on the first catalog access. The
+transaction preserves accounts, policy, bindings, secrets, and revisions; it adds
+default-disabled protocol access. Sources before v5 also receive all five global
+mutation grants, inheriting account overrides, and an unset draft mailbox. A v3
+source additionally receives empty account tag mappings and the disabled
+attachment-content policy. Exact schema and invariant checks finish before v6
 is recorded; failure leaves the original version intact. Other unsupported
 versions, corrupt storage, and insecure storage fail closed. Legacy TOML,
 environment, and keyring sources remain supported through explicit import. In
 legacy mode, an unavailable or unsafe operational database produces a bounded
 warning and the metadata query uses its bounded IMAP fallback instead.
 
-### Upgrading a managed catalog to v5
+### Upgrading a managed catalog to v6
+
+Managed v3/v4/v5 catalogs migrate transactionally to v6. The new protocol-access
+flag defaults to false for every existing account; account grants and other
+configuration remain intact. Migration never reads credential values.
 
 1. Stop every MCP, UI, and CLI process using the selected catalog before opening
    it with the new application. Even an inspection command can trigger migration.
@@ -507,7 +548,7 @@ warning and the metadata query uses its bounded IMAP fallback instead.
 3. Upgrade UI, CLI, and MCP together to the same release, then restart each MCP
    client. Do not leave an older process sharing the newly migrated catalog.
 
-Versions that only understand v3/v4 cannot open v5. Downgrading only the package
+Versions that only understand v3/v4/v5 cannot open v6. Downgrading only the package
 is therefore insufficient: stop the new processes and restore the matching
 pre-upgrade catalog and bootstrap with the older application. This restores
 local configuration to the backup point, not provider-side email effects or

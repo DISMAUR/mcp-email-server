@@ -7,6 +7,13 @@
 mcp-email-server supports stdio, SSE, and Streamable HTTP transports. Use stdio
 for a local MCP client unless a network transport is specifically required.
 
+`account add` and `account update` accept
+`--allow-protocol-commands/--no-allow-protocol-commands`. New accounts default to
+disabled; an omitted update preserves the current value. `account show --json`
+returns `allow_protocol_commands`. This user-operated opt-in grants broader raw
+protocol semantics and still requires [compatible policy](configuration.md#advanced-protocol-access).
+It is not an MCP argument or a transport-wide switch.
+
 ## CLI commands
 
 ```text

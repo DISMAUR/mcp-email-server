@@ -401,6 +401,8 @@ class TestMcpTools:
         for properties in tools.values():
             account_name = properties.get("account_name")
             if account_name is not None:
+                if "anyOf" in account_name:
+                    account_name = next(item for item in account_name["anyOf"] if item.get("type") == "string")
                 assert account_name["maxLength"] == APPLICATION_LIMITS.account_name_bytes
 
         content_ids = tools["get_emails_content"]["email_ids"]

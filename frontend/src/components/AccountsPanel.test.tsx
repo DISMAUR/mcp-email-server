@@ -362,12 +362,14 @@ test('new accounts inherit read/write and draft overrides replace global grants'
   await user.selectOptions(screen.getByLabelText('Permission preset'), 'draft-assistant')
   expect(screen.getByText('Effective permissions: Read + draft.')).toBeVisible()
   expect(screen.getByRole('checkbox', { name: /Draft —/ })).toBeChecked()
+  expect(screen.getByRole('checkbox', { name: 'Allow advanced protocol commands' })).not.toBeChecked()
+  await user.click(screen.getByRole('checkbox', { name: 'Allow advanced protocol commands' }))
   await user.type(screen.getByLabelText('Drafts mailbox (optional)'), 'Drafts/Assistant')
   await user.type(screen.getByLabelText('Email address'), 'draft@example.test')
   await user.type(screen.getByLabelText('Password or app password'), 'synthetic-secret')
   await user.click(screen.getByRole('button', { name: 'Add account' }))
   await waitFor(() => expect(api.createAccount).toHaveBeenCalledWith(expect.objectContaining({
-    allowed_mutations: ['draft'], drafts_mailbox: 'Drafts/Assistant',
+    allowed_mutations: ['draft'], drafts_mailbox: 'Drafts/Assistant', allow_protocol_commands: true,
   }), expect.anything(), expect.any(Number), target))
 })
 
@@ -378,7 +380,7 @@ test('editing preserves explicit read-only grants despite global read/write, and
     name: 'readonly', email_address: 'read@example.test', enabled: true, revision: 3,
     has_outgoing: false, incoming_binding: 'ACTIVE' as const, outgoing_binding: null,
     full_name: 'Read Example', save_to_sent: true, sent_folder_name: null,
-    allowed_mutations: [], drafts_mailbox: null, tags: [],
+    allowed_mutations: [], drafts_mailbox: null, tags: [], allow_protocol_commands: true,
     incoming: { host: 'imap.example.test', port: 993, user_name: 'read@example.test', use_ssl: true, start_ssl: false, verify_ssl: true },
     outgoing: null,
   }
@@ -386,10 +388,12 @@ test('editing preserves explicit read-only grants despite global read/write, and
   vi.mocked(api.account).mockResolvedValue(account)
   render(<AccountsPanel api={api} target={target} />)
   await user.click(await screen.findByRole('button', { name: 'Edit' }))
+  expect(screen.getByRole('checkbox', { name: 'Allow advanced protocol commands' })).toBeChecked()
+  await user.click(screen.getByRole('checkbox', { name: 'Allow advanced protocol commands' }))
   expect(screen.getByLabelText('Permission preset')).toHaveValue('readonly')
   expect(screen.getByRole('checkbox', { name: 'Inherit global mutation grants' })).not.toBeChecked()
   await user.click(screen.getByRole('button', { name: 'Save changes' }))
-  await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith('readonly', expect.objectContaining({ allowed_mutations: [] }), target))
+  await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith('readonly', expect.objectContaining({ allowed_mutations: [], allow_protocol_commands: false }), target))
   await user.click(await screen.findByRole('button', { name: 'Edit' }))
   await user.click(screen.getByRole('checkbox', { name: 'Inherit global mutation grants' }))
   await user.click(screen.getByRole('button', { name: 'Save changes' }))

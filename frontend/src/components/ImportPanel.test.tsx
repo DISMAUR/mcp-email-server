@@ -73,3 +73,22 @@ test('reports password attention and notifies the account workspace after import
   expect(await screen.findByText(/password\(s\) still need attention/i)).toBeInTheDocument()
   expect(onChanged).toHaveBeenCalledOnce()
 })
+
+
+test('shows source protocol access before import confirmation', async () => {
+  const api = createMockApi()
+  const plan = emptyPlan()
+  plan.accounts = [{
+    name: 'work', action: 'create', expected_target_revision: null, missing_credentials: [],
+    source: {
+      name: 'work', full_name: 'Work', email_address: 'work@example.test',
+      incoming: { host: 'imap.example.test', port: 993, use_ssl: true, start_ssl: false, verify_ssl: true, user_name: 'work' },
+      incoming_secret_source: 'plaintext', outgoing: null, outgoing_secret_source: null,
+      save_to_sent: false, sent_folder_name: null, allow_protocol_commands: true,
+    },
+  }]
+  vi.mocked(api.previewImport).mockResolvedValue(plan)
+  render(<ImportPanel api={api} onChanged={vi.fn()} />)
+  expect(await screen.findByText(/Advanced protocol commands are enabled in this source/)).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Import accounts' })).toBeDisabled()
+})
