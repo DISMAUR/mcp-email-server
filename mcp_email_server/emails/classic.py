@@ -2243,7 +2243,7 @@ class EmailClient:
             except Exception:
                 logger.info("IMAP logout failed")
 
-    async def fetch_attachment(  # noqa: C901 - bounded MIME selection and provider cleanup
+    async def fetch_attachment(
         self,
         email_id: str,
         attachment_name: str,
@@ -2297,19 +2297,19 @@ class EmailClient:
             mime_type = None
             normalized_attachment_name = self._normalize_attachment_name(attachment_name)
 
-            if email_message.is_multipart():
-                for part in email_message.walk():
-                    # Match attachments listed by ``_parse_email_data`` — this includes
-                    # inline-disposition parts with a filename (e.g. iOS Mail photos).
-                    if not self._is_attachment_part(part):
-                        continue
-                    filename = part.get_filename()
-                    if not isinstance(filename, str):
-                        continue
-                    if self._normalize_attachment_name(filename) == normalized_attachment_name:
-                        attachment_data = _decoded_payload(part)
-                        mime_type = part.get_content_type()
-                        break
+            # walk() includes the root, which can itself be a single-part attachment.
+            for part in email_message.walk():
+                # Match attachments listed by ``_parse_email_data`` — this includes
+                # inline-disposition parts with a filename (e.g. iOS Mail photos).
+                if not self._is_attachment_part(part):
+                    continue
+                filename = part.get_filename()
+                if not isinstance(filename, str):
+                    continue
+                if self._normalize_attachment_name(filename) == normalized_attachment_name:
+                    attachment_data = _decoded_payload(part)
+                    mime_type = part.get_content_type()
+                    break
 
             if attachment_data is None:
                 msg = f"Attachment '{attachment_name}' not found in email {email_id}"

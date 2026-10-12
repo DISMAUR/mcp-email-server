@@ -770,6 +770,12 @@ blocked IDs.
 
 ## Attachments
 
+Both attachment tools accept filenames returned by `get_emails_content`,
+including single-part messages whose top-level body is a named attachment
+(such as an `application/zip` report with `Content-Disposition: attachment`).
+A multipart envelope is not required. Named inline parts and parts with a
+`Content-Type` filename are also supported.
+
 ### `get_attachment_content`
 
 Reads one named attachment as an MCP embedded binary resource without writing a

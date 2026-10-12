@@ -574,6 +574,67 @@ async def test_fetch_attachment_is_not_bounded_by_download_ceiling(email_client)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["attachment", "inline", None])
+@pytest.mark.parametrize("payload", [b"PK\x03\x04report bytes\x00\xff", b""])
+async def test_single_part_attachment_can_be_listed_fetched_and_downloaded(
+    email_client, tmp_path, disposition, payload
+) -> None:
+    """A top-level filename is retrievable without a multipart envelope."""
+    message = MIMEApplication(payload, _subtype="zip")
+    if disposition is None:
+        message.set_param("name", "report.zip")
+    else:
+        message.add_header("Content-Disposition", disposition, filename="report.zip")
+    assert not message.is_multipart()
+    raw_email = message.as_bytes()
+    parsed = email_client._parse_email_data(raw_email, "1")
+    assert parsed["attachments"] == ["report.zip"]
+    assert parsed["body"] == ""
+
+    mock_imap = AsyncMock()
+    mock_imap.login.return_value = MagicMock(result="OK", lines=[])
+    mock_imap.select.return_value = ("OK", [b"1"])
+    fetch_data = [b"1 FETCH (BODY[] {%d}" % len(raw_email), bytearray(raw_email), b")"]
+    destination = tmp_path / "downloaded.zip"
+    with (
+        patch.object(email_client, "_connect_imap", AsyncMock(return_value=mock_imap)),
+        patch.object(email_client, "_fetch_email_with_formats", AsyncMock(return_value=fetch_data)),
+    ):
+        fetched = await email_client.fetch_attachment("1", "report.zip")
+        downloaded = await email_client.download_attachment("1", "report.zip", str(destination))
+        with pytest.raises(ValueError, match="not found in email 1"):
+            await email_client.fetch_attachment("1", "missing.zip")
+
+    assert fetched == {
+        "email_id": "1",
+        "attachment_name": "report.zip",
+        "mime_type": "application/zip",
+        "content": payload,
+    }
+    assert downloaded["mime_type"] == "application/zip"
+    assert downloaded["size"] == len(payload)
+    assert destination.read_bytes() == payload
+    assert mock_imap.logout.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_single_part_body_is_not_an_attachment(email_client) -> None:
+    raw_email = MIMEText("Ordinary message body").as_bytes()
+    assert email_client._parse_email_data(raw_email, "1")["attachments"] == []
+    mock_imap = AsyncMock()
+    mock_imap.login.return_value = MagicMock(result="OK", lines=[])
+    mock_imap.select.return_value = ("OK", [b"1"])
+    fetch_data = [b"1 FETCH (BODY[] {%d}" % len(raw_email), bytearray(raw_email), b")"]
+    with (
+        patch.object(email_client, "_connect_imap", AsyncMock(return_value=mock_imap)),
+        patch.object(email_client, "_fetch_email_with_formats", AsyncMock(return_value=fetch_data)),
+        pytest.raises(ValueError, match="not found in email 1"),
+    ):
+        await email_client.fetch_attachment("1", "report.zip")
+    mock_imap.logout.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_download_attachment_retains_download_ceiling(email_client, tmp_path) -> None:
     destination = tmp_path / "report.pdf"
     with (
