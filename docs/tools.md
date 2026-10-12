@@ -27,6 +27,95 @@ and flags. JSON Schema counts characters while the application limits UTF-8
 bytes, so every application service independently revalidates direct and MCP
 callers; aggregate recipient and payload limits also remain application-owned.
 
+## Additional operations: `email_command`
+
+Use this single gateway for additional mail workflows not covered by focused
+tools. The initial operations are `copy_emails` and `create_mailbox`; the
+standalone `create_mailbox` tool remains compatible. There is no standalone
+`copy_emails` tool and no raw IMAP/SMTP command interface.
+
+1. `{"action":"list"}` returns a sorted index. Follow `next_cursor` with the
+   `cursor` parameter when present; omit it to start again.
+2. `{"action":"describe","operation":"copy_emails"}` returns complete argument
+   and result-data schemas, an execute example, grants, and effect/recovery notes.
+3. Execute with an explicit account and a real JSON object:
+
+```json
+{
+  "action": "execute",
+  "operation": "copy_emails",
+  "account_name": "personal",
+  "arguments": {
+    "email_ids": ["123", "456"],
+    "source_mailbox": "INBOX",
+    "destination_mailbox": "Bills"
+  }
+}
+```
+
+Discovery is local, account-independent, and does not access credentials or mail.
+Clients that already know the operation can execute directly. Unknown fields and
+non-null fields inappropriate to the action are rejected; null optional fields
+count as omitted. Do not pass `arguments` as a JSON-encoded string or include an
+account, credential, endpoint, or grant override inside it.
+
+COPY requires `organize`, 1-100 unique source UID strings, and a distinct existing
+destination in the same account. `source_mailbox` defaults to `INBOX`. It retains
+original messages and flags, performs no STORE/MOVE/EXPUNGE, and never creates a
+missing destination. It applies the same sender policy as move. Repeated COPY
+can create duplicates; missing-UID preflight is not atomic with copying, and no
+destination UID or deduplication guarantee is returned.
+
+To create a destination explicitly, execute `create_mailbox` with
+`"arguments":{"mailbox":"Bills"}`. It requires `organize` and shares the
+standalone tool's existing service. Its data status is `created`,
+`already_exists`, or `unknown`.
+
+### Results and corrective errors
+
+Every action returns the same envelope in `structuredContent` and as JSON text:
+`action`, `operation`, `status`, `data`, `error`, `warnings`, and
+`reconciliation_needed`. Operation-specific data is described by `describe`.
+
+| Status      | Meaning                                                     | MCP `isError` |
+| ----------- | ----------------------------------------------------------- | ------------- |
+| `completed` | Discovery succeeded or all reported targets succeeded       | false         |
+| `partial`   | At least one success and at least one failed/unknown target | true          |
+| `failed`    | Pre-effect rejection or only known failures                 | true          |
+| `unknown`   | No known success and at least one ambiguous effect          | true          |
+
+Read all ordered target outcomes: `isError=true` does **not** mean no effects
+occurred. `not-attempted` is distinct from an ambiguous effect. Projection
+warnings do not undo successful effects. Never replay the entire partial batch
+or unknown targets automatically. Inspect the destination first, then decide
+which confirmed failures need a separate user-authorized action.
+
+Errors provide a stable code, safe known field where available, and corrective
+instructions without echoing supplied values or provider replies:
+
+- `invalid_request` / `invalid_arguments`: correct the indicated field using the
+  schema from `describe`; remove unknown fields. For mailbox creation, remove
+  any trailing server hierarchy delimiter when indicated (CREATE was not attempted).
+- `unknown_operation` / `invalid_cursor`: call `list` again.
+- `account_unavailable`: select an exact name from `list_available_accounts`;
+  hand configuration to the user-operated CLI/UI, never ask for credentials.
+- `policy_denied` / `unsupported_capability`: review grants or choose an IMAP
+  account; tool discovery is not permission to execute.
+- `provider_rejected`: the server explicitly refused creation; check the name
+  and server permissions.
+- `provider_failure`, `execution_cancelled`, or `execution_unknown`: usable
+  effect evidence is missing. Reconcile before considering another mutation.
+- `result_limit`: result representation exceeded the boundary; known status is
+  retained, but do not replay to recover missing output.
+
+The command envelope is limited to 64 KiB and JSON depth 8. Discovery pages hold
+at most 50 entries; each page/descriptor is limited to 32 KiB. Operation names
+are lowercase ASCII identifiers up to 64 characters; cursors are bounded to 256
+bytes. Existing account/mailbox/UID/provider limits apply, and both result
+representations together must fit 8 MiB. Tool annotations conservatively describe
+a non-idempotent destructive remote mutation, so some hosts request approval
+even for local discovery. Per-operation notes do not replace account grants.
+
 ## Account resource
 
 The resource URI `email://{account_name}` returns the same stable non-secret
@@ -72,13 +161,13 @@ freshly before independent provider effects. Global `allowed_mutations` defaults
 to all five classes for old and new configurations. Account omission/null
 inherits; an explicit list replaces; `[]` means read-only.
 
-| Class      | Workflows                                                                                  |
-| ---------- | ------------------------------------------------------------------------------------------ |
-| `draft`    | `save_draft` with fixed destination resolution and `\Draft` flag                           |
-| `organize` | mark-read/unread, `set_email_flags`, `set_email_tags`, move, archive, and `create_mailbox` |
-| `delete`   | `delete_emails` and its scoped deletion/expunge                                            |
-| `send`     | `send_email`, `forward_email`, and narrowly their successful-message Sent copy             |
-| `append`   | `save_to_mailbox` with caller mailbox and flags                                            |
+| Class      | Workflows                                                                                                       |
+| ---------- | --------------------------------------------------------------------------------------------------------------- |
+| `draft`    | `save_draft` with fixed destination resolution and `\Draft` flag                                                |
+| `organize` | mark-read/unread, `set_email_flags`, `set_email_tags`, move, archive, `create_mailbox`, and gateway COPY/CREATE |
+| `delete`   | `delete_emails` and its scoped deletion/expunge                                                                 |
+| `send`     | `send_email`, `forward_email`, and narrowly their successful-message Sent copy                                  |
+| `append`   | `save_to_mailbox` with caller mailbox and flags                                                                 |
 
 `get_emails_content(mark_as_read=true)` also requires `organize`; use the
 non-marking read option for a read-only account. Organization cannot perform

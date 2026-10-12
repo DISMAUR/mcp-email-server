@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mcp_email_server import config as config_module
+from mcp_email_server.application.accounts import AccountUnavailableError
 from mcp_email_server.application.management import BindingRole
 from mcp_email_server.application.metadata import RuntimeMode
 from mcp_email_server.bootstrap import process_bootstrap
@@ -39,7 +40,7 @@ def resolve_local_account(
             resolution = catalog.resolve_account(account_name, roles=roles)
         except ManagedCatalogError as exc:
             if "not found or is disabled" in str(exc):
-                raise ValueError(f"Account {account_name} was not found") from None
+                raise AccountUnavailableError(f"Account {account_name} was not found") from None
             raise
         policy = resolution.policy
         settings = Settings.model_construct(
@@ -61,5 +62,5 @@ def resolve_local_account(
     if isinstance(account, ProviderSettings):
         raise NotImplementedError
     if not isinstance(account, EmailSettings):
-        raise ValueError(f"Account {account_name} was not found")  # noqa: TRY004
+        raise AccountUnavailableError(f"Account {account_name} was not found")
     return LocalAccountResolution(mode=mode, settings=settings, account=account)

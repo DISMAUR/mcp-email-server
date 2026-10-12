@@ -43,6 +43,7 @@ from mcp_email_server.application.reads import (
     GetEmailContentQuery,
     ListMailboxesQuery,
 )
+from mcp_email_server.email_commands import email_command
 from mcp_email_server.emails.models import (
     AttachmentDownloadResponse,
     CreateMailboxResult,
@@ -51,6 +52,7 @@ from mcp_email_server.emails.models import (
     MailboxInfo,
 )
 from mcp_email_server.imap_keywords import ImapKeywordTag
+from mcp_email_server.mcp_boundary import EmailMCP
 from mcp_email_server.runtime import close_application_runtime, get_application_runtime
 
 MAX_IMAP_UID_CHARACTERS = len(str(APPLICATION_LIMITS.maximum_imap_uid))
@@ -245,7 +247,7 @@ async def _application_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, obj
             await close_application_runtime()
 
 
-mcp = FastMCP("email", lifespan=_application_lifespan)
+mcp = EmailMCP("email", lifespan=_application_lifespan)
 # FastMCP 1.x does not expose its low-level server version in the constructor.
 mcp._mcp_server.version = version("mcp-email-server")  # pyright: ignore[reportPrivateUsage]
 
@@ -279,6 +281,18 @@ _DESTRUCTIVE_REMOTE_MUTATION = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=True,
 )
+mcp.tool(
+    description=(
+        "Discover and execute additional mail operations such as copying messages or creating a mailbox. "
+        "Use action=list for supported operations, describe with operation for its schema, then execute with "
+        "operation, account_name, and a real JSON arguments object. Known operations may execute directly. "
+        "Discovery is local and account-independent; execution requires current account grants. "
+        "Read ordered outcomes even when isError=true: partial or unknown results may have effects. "
+        "Never replay the whole batch or unknown effects automatically; inspect the destination first."
+    ),
+    annotations=_DESTRUCTIVE_REMOTE_MUTATION,
+)(email_command)
+
 _FILESYSTEM_WRITE = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=True,

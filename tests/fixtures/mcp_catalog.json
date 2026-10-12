@@ -1,6 +1,189 @@
 {
     "tools": [
         {
+            "name": "email_command",
+            "description": "Discover and execute additional mail operations such as copying messages or creating a mailbox. Use action=list for supported operations, describe with operation for its schema, then execute with operation, account_name, and a real JSON arguments object. Known operations may execute directly. Discovery is local and account-independent; execution requires current account grants. Read ordered outcomes even when isError=true: partial or unknown results may have effects. Never replay the whole batch or unknown effects automatically; inspect the destination first.",
+            "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                    "action": {
+                        "enum": ["list", "describe", "execute"],
+                        "title": "Action",
+                        "type": "string"
+                    },
+                    "operation": {
+                        "anyOf": [
+                            {
+                                "maxLength": 64,
+                                "pattern": "^[a-z][a-z0-9_]*$",
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Operation"
+                    },
+                    "account_name": {
+                        "anyOf": [
+                            {
+                                "maxLength": 256,
+                                "minLength": 1,
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Account Name"
+                    },
+                    "arguments": {
+                        "anyOf": [
+                            {
+                                "additionalProperties": true,
+                                "type": "object"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Arguments"
+                    },
+                    "cursor": {
+                        "anyOf": [
+                            {
+                                "maxLength": 256,
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Cursor"
+                    }
+                },
+                "required": ["action"],
+                "title": "CommandRequest",
+                "type": "object"
+            },
+            "outputSchema": {
+                "$defs": {
+                    "CommandError": {
+                        "additionalProperties": false,
+                        "properties": {
+                            "code": {
+                                "title": "Code",
+                                "type": "string"
+                            },
+                            "message": {
+                                "maxLength": 4096,
+                                "title": "Message",
+                                "type": "string"
+                            },
+                            "field": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "title": "Field"
+                            }
+                        },
+                        "required": ["code", "message"],
+                        "title": "CommandError",
+                        "type": "object"
+                    }
+                },
+                "additionalProperties": false,
+                "properties": {
+                    "action": {
+                        "anyOf": [
+                            {
+                                "enum": ["list", "describe", "execute"],
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Action"
+                    },
+                    "operation": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Operation"
+                    },
+                    "status": {
+                        "enum": ["completed", "partial", "failed", "unknown"],
+                        "title": "Status",
+                        "type": "string"
+                    },
+                    "data": {
+                        "anyOf": [
+                            {
+                                "additionalProperties": true,
+                                "type": "object"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Data"
+                    },
+                    "error": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/$defs/CommandError"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null
+                    },
+                    "warnings": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "maxItems": 100,
+                        "title": "Warnings",
+                        "type": "array"
+                    },
+                    "reconciliation_needed": {
+                        "default": false,
+                        "title": "Reconciliation Needed",
+                        "type": "boolean"
+                    }
+                },
+                "required": ["status"],
+                "title": "EmailCommandResult",
+                "type": "object"
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": true
+            }
+        },
+        {
             "name": "list_available_accounts",
             "description": "List configured accounts as stable non-secret capability records. Use only accounts with can_receive=true for mail reads and can_send=true for send_email and forward_email. If the result is empty, ask the user to run `mcp-email-server ui` or the user-operated CLI; never ask for credentials in chat.",
             "inputSchema": {

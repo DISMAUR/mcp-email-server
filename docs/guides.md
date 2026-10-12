@@ -54,6 +54,35 @@ tools remain available, so this is not a strict read-only mode. To limit
 mutations, set `allowed_mutations = []` globally or on the account. Omitted
 settings retain read/write access; an account null/omitted override inherits.
 
+## Copy messages while retaining originals
+
+Call `email_command` with `action=list`, then describe `copy_emails`. Select the
+account and list metadata in the source mailbox to obtain current UIDs. Choose
+an existing distinct destination with `list_mailboxes`, or explicitly execute
+`create_mailbox` first. Both operations require `organize`.
+
+```json
+{
+  "action": "execute",
+  "operation": "copy_emails",
+  "account_name": "work",
+  "arguments": {
+    "email_ids": ["42"],
+    "source_mailbox": "INBOX",
+    "destination_mailbox": "Receipts"
+  }
+}
+```
+
+COPY retains the source message and flags. Read the ordered outcomes, not just
+MCP `isError`. If any target is unknown, inspect destination metadata/content
+before deciding what happened. Do not replay the batch to retrieve a missing
+response: a repeated copy can create duplicates. For a partial result, preserve
+successes and distinguish confirmed failures from unknown or not-attempted
+targets. Destination UIDs are different mailbox-local identifiers; list them
+again rather than reusing source UIDs. An unsupported operation such as mailbox
+rename must not be approximated by guessed raw commands.
+
 ## Safe delete and move behavior
 
 Message-scoped deletion never uses mailbox-wide IMAP `EXPUNGE`, which would

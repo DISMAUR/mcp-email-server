@@ -184,7 +184,31 @@ Archive resolves an explicit destination policy and then follows the same move
 contract. Destination creation, if supported, is a separate effect with its own
 policy and evidence; it is not silently attempted after an unsafe fallback.
 
+## Copy Within One Account
+
+`CopyCommand` requires 1-100 unique canonical UIDs, a source mailbox, and a
+distinct existing destination in the same selected account. INBOX comparison
+is case-insensitive; other mailbox names retain exact identity. `organize` is
+required before provider construction and freshly before each UID COPY.
+Sender restrictions preserve the existing hidden-success no-op behavior unless
+blocked-mutation reporting is enabled.
+
+COPY uses UID COPY only: no MOVE, STORE, EXPUNGE, or implicit CREATE. Source UIDs
+and flags remain unchanged. A source UID SEARCH detects absent targets before
+COPY, but is not atomic with the effect and cannot guarantee race-free copying,
+destination UIDs, deduplication, or exactly-once delivery. Only the destination
+projection is invalidated when an effect succeeded or may have started.
+
+Outcomes remain input-aligned. Explicit rejection is failed; lost evidence is
+unknown; interruption records the current target as unknown and remaining
+unattempted targets as failed/not-attempted. A later denial cannot erase earlier
+success. No automatic replay is permitted. The public route is the
+`copy_emails` operation of `email_command` (spec 10), not a standalone tool.
+
 ## Mailbox Creation
+
+The gateway's `create_mailbox` operation and existing standalone tool share this
+same service and authority pipeline; only their result adapters differ.
 
 `create_mailbox` is the only workflow that creates a mailbox. It is an explicit,
 caller-requested effect under `organize`; move, archive, Junk discovery, draft

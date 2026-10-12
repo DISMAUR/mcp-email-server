@@ -1,0 +1,161 @@
+[
+    {
+        "operation": "copy_emails",
+        "summary": "Copy selected messages within one account, retaining the originals.",
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "email_ids": {
+                    "items": {
+                        "maxLength": 10,
+                        "pattern": "^[1-9][0-9]*$",
+                        "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "title": "Email Ids",
+                    "type": "array"
+                },
+                "destination_mailbox": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Destination Mailbox",
+                    "type": "string"
+                },
+                "source_mailbox": {
+                    "default": "INBOX",
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Source Mailbox",
+                    "type": "string"
+                }
+            },
+            "required": ["email_ids", "destination_mailbox"],
+            "title": "CopyArguments",
+            "type": "object"
+        },
+        "data_schema": {
+            "$defs": {
+                "TargetResult": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "target": {
+                            "maxLength": 10,
+                            "pattern": "^[1-9][0-9]*$",
+                            "title": "Target",
+                            "type": "string"
+                        },
+                        "status": {
+                            "enum": ["succeeded", "failed", "unknown"],
+                            "title": "Status",
+                            "type": "string"
+                        },
+                        "detail": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "default": null,
+                            "title": "Detail"
+                        }
+                    },
+                    "required": ["target", "status"],
+                    "title": "TargetResult",
+                    "type": "object"
+                }
+            },
+            "additionalProperties": false,
+            "properties": {
+                "source_mailbox": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Source Mailbox",
+                    "type": "string"
+                },
+                "destination_mailbox": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Destination Mailbox",
+                    "type": "string"
+                },
+                "outcomes": {
+                    "items": {
+                        "$ref": "#/$defs/TargetResult"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "title": "Outcomes",
+                    "type": "array"
+                }
+            },
+            "required": ["source_mailbox", "destination_mailbox", "outcomes"],
+            "title": "CopyData",
+            "type": "object"
+        },
+        "example": {
+            "action": "execute",
+            "operation": "copy_emails",
+            "account_name": "personal",
+            "arguments": {
+                "email_ids": ["123", "456"],
+                "source_mailbox": "INBOX",
+                "destination_mailbox": "Bills"
+            }
+        },
+        "required_grants": ["organize"],
+        "effect_notes": "Requires IMAP and organize. UID COPY only: no MOVE, STORE, EXPUNGE, or implicit CREATE. The destination must exist and differ from the source (INBOX is case-insensitive). Sender policy applies; hidden blocked messages remain successful no-ops unless reporting is enabled. Non-idempotent: repeating can create duplicates. Source UID preflight is not atomic with COPY; no destination UID, deduplication, or exactly-once guarantee.",
+        "reconciliation": "Do not replay the whole request or unknown targets automatically; inspect the destination first."
+    },
+    {
+        "operation": "create_mailbox",
+        "summary": "Create an exact mailbox name, or report that it already exists.",
+        "arguments_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Mailbox",
+                    "type": "string"
+                }
+            },
+            "required": ["mailbox"],
+            "title": "CreateArguments",
+            "type": "object"
+        },
+        "data_schema": {
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "title": "Mailbox",
+                    "type": "string"
+                },
+                "status": {
+                    "enum": ["created", "already_exists", "unknown"],
+                    "title": "Status",
+                    "type": "string"
+                }
+            },
+            "required": ["mailbox", "status"],
+            "title": "CreateData",
+            "type": "object"
+        },
+        "example": {
+            "action": "execute",
+            "operation": "create_mailbox",
+            "account_name": "personal",
+            "arguments": {
+                "mailbox": "Bills"
+            }
+        },
+        "required_grants": ["organize"],
+        "effect_notes": "Requires IMAP and organize. Uses the existing mailbox creation service. No LIST wildcards or trailing server hierarchy delimiter. Returns created, already_exists, or unknown. No messages are moved or copied.",
+        "reconciliation": "Do not replay the whole request or unknown targets automatically; inspect the destination first."
+    }
+]

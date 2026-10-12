@@ -528,6 +528,31 @@ async def test_managed_cli_setup_restart_and_stdio_list_mailboxes_against_greenm
                 {"account_name": "alice-managed", "page_size": 10},
             )
             assert refreshed["total"] == 1
+            gateway_folder = f"ManagedCopy-{uuid.uuid4().hex[:8]}"
+            gateway_created = await _call_tool(
+                session,
+                "email_command",
+                {
+                    "action": "execute",
+                    "operation": "create_mailbox",
+                    "account_name": "alice-managed",
+                    "arguments": {"mailbox": gateway_folder},
+                },
+            )
+            assert gateway_created["data"]["status"] == "created"
+            gateway_copy = await _call_tool(
+                session,
+                "email_command",
+                {
+                    "action": "execute",
+                    "operation": "copy_emails",
+                    "account_name": "alice-managed",
+                    "arguments": {"email_ids": [managed_uid], "destination_mailbox": gateway_folder},
+                },
+            )
+            assert gateway_copy["status"] == "completed"
+            _wait_for_message(ALICE, gateway_folder, subject)
+            assert _wait_for_message(ALICE, "INBOX", subject).uid == managed_uid
             move = await _call_tool(
                 session,
                 "move_emails",
@@ -1068,6 +1093,66 @@ async def test_recipient_globs_against_greenmail(tmp_path: Path, pattern: str) -
             assert _find_message(BOB, "INBOX", f"draft-{subject}") is None
 
 
+async def _assert_gateway_copy(session, source, subject, grants):
+    discovery = await _call_tool(session, "email_command", {"action": "list"})
+    assert {item["operation"] for item in discovery["data"]["operations"]} == {
+        "copy_emails",
+        "create_mailbox",
+    }
+    description = await _call_tool(
+        session,
+        "email_command",
+        {
+            "action": "describe",
+            "operation": "copy_emails",
+        },
+    )
+    assert description["data"]["required_grants"] == ["organize"]
+    copy_folder = f"Copy-{uuid.uuid4().hex[:8]}"
+    gateway_created = await session.call_tool(
+        "email_command",
+        {
+            "action": "execute",
+            "operation": "create_mailbox",
+            "account_name": "alice",
+            "arguments": {"mailbox": copy_folder},
+        },
+    )
+    copied = await session.call_tool(
+        "email_command",
+        {
+            "action": "execute",
+            "operation": "copy_emails",
+            "account_name": "alice",
+            "arguments": {"email_ids": [source.uid], "destination_mailbox": copy_folder},
+        },
+    )
+    if grants is None or "organize" in grants:
+        assert gateway_created.structuredContent["data"]["status"] == "created"
+        assert copied.structuredContent["status"] == "completed"
+        _wait_for_message(ALICE, copy_folder, subject)
+        mailboxes = await _call_tool(session, "list_mailboxes", {"account_name": "alice"})
+        delimiter = next(item["delimiter"] for item in mailboxes["result"] if item["name"] == "INBOX")
+        assert delimiter
+        rejected = await session.call_tool(
+            "email_command",
+            {
+                "action": "execute",
+                "operation": "create_mailbox",
+                "account_name": "alice",
+                "arguments": {"mailbox": f"{copy_folder}-invalid{delimiter}"},
+            },
+        )
+        assert rejected.structuredContent["status"] == "failed"
+        assert rejected.structuredContent["error"]["field"] == "mailbox"
+    else:
+        assert gateway_created.structuredContent["error"]["code"] == "policy_denied"
+        assert copied.structuredContent["error"]["code"] == "policy_denied"
+    retained = _wait_for_message(ALICE, "INBOX", subject)
+    assert retained.uid == source.uid
+    assert r"\Deleted" not in retained.flags
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("grants", [None, [], ["draft"], ["send"], ["append"], ["append", "delete"], ["organize"]])
 async def test_account_mutation_grants_against_greenmail(tmp_path: Path, grants: list[str] | None) -> None:
@@ -1105,6 +1190,8 @@ async def test_account_mutation_grants_against_greenmail(tmp_path: Path, grants:
             tool_names = {tool.name for tool in (await session.list_tools()).tools}
             assert {"save_draft", "save_to_mailbox", "send_email", "set_email_flags"} <= tool_names
             assert (await _metadata_for_subject(session, "alice", subject))["email_id"] == source.uid
+
+            await _assert_gateway_copy(session, source, subject, grants)
 
             draft_subject = f"draft-{subject}"
             draft = await session.call_tool(

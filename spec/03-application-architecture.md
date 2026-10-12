@@ -61,6 +61,14 @@ Starlette, React, concrete SQLite, keyring, or concrete mail clients.
 
 ## Interface Adapters
 
+The long-tail `email_command` gateway is an MCP adapter, not an application or
+provider command interpreter. Its immutable local registry owns discovery and
+boundary DTOs; execution converts these DTOs to existing domain commands and
+calls one service workflow. It stores no account snapshots, credentials, or
+provider sessions. A narrow FastMCP boundary bypasses permissive SDK argument
+coercion only for this tool and explicitly validates its native structured
+results. Other tool paths remain unchanged. Spec 10 owns its public contract.
+
 MCP, CLI, and Web UI adapters MUST:
 
 - validate syntax and map framework objects to typed commands/queries;

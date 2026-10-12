@@ -33,6 +33,27 @@ before release.
 | agent integration and safe setup handoff           | 11                     | Codex/Claude Code install fixtures, scenario, drift, and no-secret tests                        |
 | release artifacts and container delivery           | 12                     | exact source/version, restricted image, raw stdio, multi-platform, and publication gates        |
 
+### Long-tail command gateway delivery gate
+
+Specs 03, 07, and 10 own the adapter placement, COPY effects, and gateway
+contract. `email_commands.py`, `mcp_boundary.py`, the mutation service/adapter,
+and classic IMAP implementation must agree with tools/security/guides docs.
+`tests/test_email_commands.py` covers strict raw MCP validation, exact optional
+strings, local discovery, operation snapshots/examples, safe diagnostics,
+status/isError/text parity, pagination, and final wire bounds.
+`tests/test_copy_emails.py` covers protocol effects, grants, sender filtering,
+ambiguity, cancellation, and destination invalidation. Full catalog snapshots
+must prove all 20 old definitions unchanged plus one gateway; GreenMail stdio
+must exercise list/describe/create/copy, source retention, and grant denial in
+addition to managed/legacy authority coverage.
+
+Run the normal check/test/docs/GreenMail gates and focused boundary tests against
+the locked SDK and declared minimum. Supported Codex/Claude model scenarios
+(English/Chinese COPY, creation, unsupported operation, argument repair, unknown
+no-replay) require separate empirical evidence; protocol/provider E2E is not
+proof of model discovery quality. Report an unavailable client evaluation
+explicitly rather than claiming model acceptance.
+
 ### Mutation-class policy delivery gate
 
 This accepted alternative to #209 is not declared shipped by this specification.

@@ -42,6 +42,12 @@ class ApplicationLimits:
     spill_file_bytes: int = 64 * 1_024 * 1_024
     ui_json_body_bytes: int = 1 * 1_024 * 1_024
     provider_timeout_seconds: float = 60.0
+    command_operation_characters: int = 64
+    command_cursor_bytes: int = 256
+    command_page_items: int = 50
+    command_envelope_bytes: int = 64 * 1_024
+    command_json_depth: int = 8
+    command_discovery_bytes: int = 32 * 1_024
 
 
 APPLICATION_LIMITS = ApplicationLimits()

@@ -43,6 +43,11 @@ bounded, rebuildable observations.
 | [`11-agent-integration-and-safe-setup.md`](11-agent-integration-and-safe-setup.md)                     | Codex/Claude Code integration, safe CLI/UI handoff, installation, and no-secret agent rules                                                 |
 | [`12-delivery-validation-and-evolution.md`](12-delivery-validation-and-evolution.md)                   | verification map, test layers, package/release gates, documentation, and future change rules                                                |
 
+The long-tail `email_command` registry is owned by spec 10, with adapter placement
+in spec 03, COPY effects in spec 07, and delivery gates in spec 12. Existing
+focused tools remain compatible; new low-frequency workflows use this bounded
+registry rather than a raw protocol interface.
+
 Cross-references point to the owning document rather than duplicating its full
 contract. This README is the only ordered navigation map.
 

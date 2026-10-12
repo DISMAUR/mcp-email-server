@@ -316,6 +316,10 @@ The account editor distinguishes inherited permissions from an explicit list
 and exposes the optional `drafts_mailbox`. The global policy editor selects the
 same five classes. These are permissions, not a mail composer or approval flow.
 See [tool permissions](tools.md#mail-mutation-permissions) for the effect mapping.
+The `email_command` gateway's `copy_emails` and `create_mailbox` operations both
+use `organize`; they add no configuration fields or separate grant class.
+Local command discovery remains available for read-only accounts. Execution
+still uses the effective account policy, including sender restrictions on COPY.
 
 For legacy runtime composition, `MCP_EMAIL_SERVER_ALLOWED_MUTATIONS` is a
 comma-separated global override, for example `draft,organize`; an explicitly

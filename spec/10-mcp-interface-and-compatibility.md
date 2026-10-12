@@ -50,6 +50,62 @@ change is intentionally reviewed as a public contract change. MCP initialization
 advertises the installed `mcp-email-server` application version, never the MCP
 SDK dependency version, and raw protocol tests lock that identity.
 
+## Long-tail Email Commands
+
+Add one static `email_command` tool while preserving the existing 20 tool
+contracts. Initially register `copy_emails` and `create_mailbox`; do not publish
+a standalone COPY tool. Future low-frequency workflows normally extend this
+frozen explicit registry, not the outer MCP tool catalog. Raw protocol commands,
+dynamic method lookup, account/credential management, generic pipelines, and
+unregistered operations are forbidden.
+
+| Action     | Required fields                                    | Other permitted non-null fields |
+| ---------- | -------------------------------------------------- | ------------------------------- |
+| `list`     | `action`                                           | `cursor`                        |
+| `describe` | `action`, `operation`                              | none                            |
+| `execute`  | `action`, `operation`, `account_name`, `arguments` | none                            |
+
+Null optional fields count as omitted. Reject unknown or inappropriate fields,
+stringified argument objects, and non-JSON values before account access.
+Operation arguments use strict extra-forbidden models and domain validation;
+they cannot specify a second account, endpoint, credential, or policy override.
+Optional scalar strings retain exact identity, including JSON-looking account
+names. The scoped boundary must prevent SDK pre-parsing or validation errors
+from echoing input. Other tools retain their existing SDK behavior.
+
+`list` returns sorted summaries with at most 50 entries and a bounded opaque
+cursor. `describe` returns self-contained argument/data schemas, a full execute
+example, required grants, effect notes, and reconciliation instructions.
+Discovery never obtains runtime authority, secrets, or providers and does not
+authorize execution. Clients that already know the contract can execute directly.
+
+The fixed output envelope contains `action`, `operation`, `status`, `data`,
+`error`, `warnings`, and `reconciliation_needed`. Validate operation-specific
+data internally; derive text JSON and structuredContent from the same validated
+envelope. `completed` means all reported targets succeeded; `partial` means
+success plus failed/unknown targets; `unknown` means no success and ambiguous
+evidence; `failed` means pre-effect rejection or only known failures. Only
+`completed` sets MCP isError=false. Projection warnings do not undo success.
+Preserve ordered target detail and destination context. Never interpret isError
+as proof that no effect occurred. Include explicit no-whole-request/no-unknown-
+target replay guidance for incomplete execution. Errors use stable codes,
+allowlisted field names, and corrective instructions, not supplied values,
+unknown key names, exception strings, or raw provider replies. Unexpected
+post-effect failures cannot be relabeled safe-to-retry pre-effect failures.
+
+Central limits: operation 64 lowercase ASCII identifier characters; cursor 256
+bytes; command envelope 64 KiB, depth 8; descriptor/list-page data 32 KiB;
+existing account/mailbox/UID/provider limits still apply. Validate JSON before
+serialization, and check the full final CallToolResult including both output
+representations against the shared 8 MiB ceiling. No outer mutation timeout may
+erase service progress. Descriptor bounds are checked at registry construction.
+
+Conservative fixed annotations are readOnly=false, destructive=true,
+idempotent=false, openWorld=true. Hosts may request approval even for discovery;
+per-operation notes are advisory, not an authorization boundary. Registry
+extensions require schema snapshots, domain tests, and documentation. Breaking
+operation semantics require normal versioned compatibility treatment.
+
 ## Agent Discovery and Tool Hints
 
 Account discovery projects configuration models into one explicit non-secret

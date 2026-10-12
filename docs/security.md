@@ -82,6 +82,23 @@ or replace user-owned state; same-UID hostile path replacement is not claimed to
 be contained. Do not treat loopback, owner-only modes, or path preflight as a
 multi-user or hostile-same-UID sandbox.
 
+## Long-tail command gateway
+
+`email_command` is a fixed registry of typed mail workflows, not a raw protocol
+or management endpoint. Local list/describe actions expose only static help and
+never resolve accounts, secrets, or providers. Execution uses the same selected-
+account service grants and fresh sender-policy checks as focused tools. COPY and
+CREATE require `organize`; listing them does not grant permission.
+
+The gateway rejects extra fields, stringified argument objects, oversized/deep
+JSON, and unsupported operations before account access. Its scoped MCP boundary
+preserves exact account strings and returns safe corrective errors without
+input values, arbitrary key names, exception text, or protocol replies.
+Conservative tool annotations can cause approval prompts for discovery and
+broad tool-name approval for execution; account grants remain the enforcement
+boundary. Partial/unknown results may already have effects and must not be
+automatically replayed. See [gateway results](tools.md#results-and-corrective-errors).
+
 ## Mail provider log redaction
 
 SMTP diagnostics use bounded phase records such as `phase=mail`, `phase=rcpt`,

@@ -9,6 +9,10 @@ from mcp_email_server.application.limits import APPLICATION_LIMITS, validate_ser
 from mcp_email_server.config import AccountAttributes, EmailSettings, ProviderSettings
 
 
+class AccountUnavailableError(ValueError):
+    """The selected account is missing or disabled; no provider was opened."""
+
+
 @dataclass(frozen=True)
 class EffectiveConfiguration:
     accounts: tuple[AccountAttributes, ...]

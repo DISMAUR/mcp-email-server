@@ -53,7 +53,9 @@ from mcp_email_server.application.mutations import (
     DeliveryMutationOutcome,
     FlagOperation,
     MailboxCreationStatus,
+    MailboxHierarchyError,
     MutableEmailFlag,
+    MutationRejectedError,
     MutationStatus,
     SentCopyMutationOutcome,
     TargetMutationOutcome,
@@ -3603,6 +3605,81 @@ class EmailClient:
             await _best_effort_imap_logout(imap)
         return BatchMutationOutcome(tuple(outcomes[email_id] for email_id in email_ids))
 
+    @staticmethod
+    async def _absent_uids(
+        imap: aioimaplib.IMAP4_SSL | aioimaplib.IMAP4,
+        email_ids: list[str],
+        mailbox: str,
+    ) -> set[str]:
+        """UIDs not present in the selected mailbox; UID COPY of those completes OK without copying."""
+        if not email_ids:
+            return set()
+        search_response = await imap.uid_search("UID", ",".join(email_ids), charset=None)
+        _raise_for_imap_command_failure(search_response, f"SEARCH source mailbox {mailbox}")
+        present = set(_normalize_search_uids(search_response[1]))
+        return {email_id for email_id in email_ids if email_id not in present}
+
+    async def copy_emails_with_outcome(
+        self,
+        email_ids: list[str],
+        source_mailbox: str,
+        destination_mailbox: str,
+        allowed_senders: list[str] | None = None,
+        report_blocked_mutations: bool = False,
+    ) -> BatchMutationOutcome:
+        """Copy UIDs with UID COPY; source messages, flags, and UIDs stay untouched."""
+        _validate_imap_uids(email_ids)
+        imap = await self._connect_imap()
+        outcomes: dict[str, TargetMutationOutcome] = {}
+        try:
+            await _imap_login(imap, self.email_server.user_name, self.email_server.password.get_secret_value())
+            await _send_imap_id(imap)
+            select_response = await imap.select(_quote_mailbox(source_mailbox))
+            _raise_for_imap_error(select_response, f"SELECT source mailbox {source_mailbox}")
+            blocked = await self._blocked_uids(imap, email_ids, allowed_senders)
+            permitted: list[str] = []
+            for email_id in email_ids:
+                if email_id in blocked:
+                    outcomes[email_id] = TargetMutationOutcome(
+                        email_id,
+                        "failed" if report_blocked_mutations else "succeeded",
+                        "sender-policy" if report_blocked_mutations else None,
+                    )
+                else:
+                    permitted.append(email_id)
+            absent = await self._absent_uids(imap, permitted, source_mailbox)
+            for email_id in absent:
+                outcomes[email_id] = TargetMutationOutcome(email_id, "failed", "not-found")
+            permitted = [email_id for email_id in permitted if email_id not in absent]
+            for index, email_id in enumerate(permitted):
+                try:
+                    self._check_mutation_authority()
+                    response = await imap.uid("copy", email_id, _quote_mailbox(destination_mailbox))
+                except PermissionError:
+                    outcomes[email_id] = TargetMutationOutcome(email_id, "failed", "mutation-policy")
+                    continue
+                except asyncio.CancelledError:
+                    outcomes[email_id] = TargetMutationOutcome(email_id, "unknown", "copy-unknown")
+                    for remaining_id in permitted[index + 1 :]:
+                        outcomes[remaining_id] = TargetMutationOutcome(remaining_id, "failed", "not-attempted")
+                    break
+                except Exception:
+                    outcomes[email_id] = TargetMutationOutcome(email_id, "unknown", "copy-unknown")
+                    continue
+                copy_status = _imap_effect_status(response)
+                outcomes[email_id] = TargetMutationOutcome(
+                    email_id,
+                    copy_status,
+                    None
+                    if copy_status == "succeeded"
+                    else "copy-rejected"
+                    if copy_status == "failed"
+                    else "copy-unknown",
+                )
+        finally:
+            await _best_effort_imap_logout(imap)
+        return BatchMutationOutcome(tuple(outcomes[email_id] for email_id in email_ids))
+
     async def delete_emails(
         self,
         email_ids: list[str],
@@ -3838,7 +3915,7 @@ class EmailClient:
                 raise RuntimeError("LIST mailbox hierarchy returned no unique delimiter")
             delimiter = roots[0].delimiter
             if delimiter and mailbox.endswith(delimiter):
-                raise ValueError("mailbox must not end with the server's hierarchy delimiter")
+                raise MailboxHierarchyError("mailbox must not end with the server's hierarchy delimiter")
             response = await imap.list('""', quoted)  # pyright: ignore[reportArgumentType]
             _raise_for_imap_error(response, "LIST mailbox before CREATE")
             for existing in _parse_list_responses(response[1]):
@@ -3859,7 +3936,7 @@ class EmailClient:
             if status == "failed":
                 if _has_already_exists_code(created):
                     return "already_exists"
-                raise RuntimeError(f"CREATE mailbox failed ({_imap_status(created)})")
+                raise MutationRejectedError("provider_failure: mutation provider request failed")
             return "unknown"
         finally:
             await _best_effort_imap_logout(imap)
