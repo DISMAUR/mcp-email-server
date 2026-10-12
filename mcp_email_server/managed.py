@@ -50,7 +50,7 @@ from mcp_email_server.windows_security import (
     windows_security_supported,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _MIGRATION_SOURCE_VERSION = 3
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 WAL_RETRY_BUSY_TIMEOUT_MS = 100
@@ -127,6 +127,7 @@ class _ManagedAuthoritySnapshot:
     tags: tuple[ImapKeywordTag, ...]
     allowed_mutations: tuple[MutationClass, ...] | None
     drafts_mailbox: str | None
+    allow_protocol_commands: bool
     incoming: EndpointSummary
     outgoing: EndpointSummary | None
     binding_ids: tuple[tuple[BindingRole, str], ...]
@@ -139,6 +140,7 @@ class ManagedAccountResolution:
 
     account: EmailSettings
     policy: ManagedPolicy
+    authority_revision: tuple[str, int, int] | None = None
 
 
 class ManagedSecretStore(Protocol):
@@ -690,7 +692,13 @@ ALTER TABLE catalog ADD COLUMN allowed_mutations_json TEXT NOT NULL DEFAULT '["d
 ALTER TABLE managed_account ADD COLUMN allowed_mutations_json TEXT;
 ALTER TABLE managed_account ADD COLUMN drafts_mailbox TEXT;
 """
-_SCHEMA = _SCHEMA_V4 + _SCHEMA_V5_ADDITIONS
+_SCHEMA_V5 = _SCHEMA_V4 + _SCHEMA_V5_ADDITIONS
+_SCHEMA_V6_ADDITIONS = """
+ALTER TABLE managed_account
+    ADD COLUMN allow_protocol_commands INTEGER NOT NULL DEFAULT 0
+        CHECK (allow_protocol_commands IN (0, 1));
+"""
+_SCHEMA = _SCHEMA_V5 + _SCHEMA_V6_ADDITIONS
 _OPERATIONAL_DATABASE_SCHEMA = (
     """
 CREATE TABLE schema_metadata (
@@ -850,6 +858,8 @@ class ManagedCatalog:
             raise ManagedCatalogError("Managed catalog is corrupt or schema is missing or incompatible") from exc
         if version == SCHEMA_VERSION:
             _validate_managed_schema(connection, _SCHEMA)
+        elif version == 5:
+            _validate_managed_schema(connection, _SCHEMA_V5)
         elif version == 4:
             _validate_managed_schema(connection, _SCHEMA_V4)
         elif version == _MIGRATION_SOURCE_VERSION:
@@ -873,9 +883,13 @@ class ManagedCatalog:
                 _execute_schema(connection, _SCHEMA_V4_ADDITIONS)
             elif version == 4:
                 _validate_managed_schema(connection, _SCHEMA_V4)
+            elif version == 5:
+                _validate_managed_schema(connection, _SCHEMA_V5)
             else:
                 _require_migration_source(version)
-            _execute_schema(connection, _SCHEMA_V5_ADDITIONS)
+            if version < 5:
+                _execute_schema(connection, _SCHEMA_V5_ADDITIONS)
+            _execute_schema(connection, _SCHEMA_V6_ADDITIONS)
             _validate_managed_schema(connection, _SCHEMA)
             _validate_managed_invariants(connection)
             updated = connection.execute(
@@ -893,7 +907,7 @@ class ManagedCatalog:
         with _connect(self.path, enable_wal=False) as connection:
             version = self._preflight_schema_ownership(connection)
         with _connect(self.path) as connection:
-            if version in (3, 4):
+            if version in (3, 4, 5):
                 self._migrate_to_current_schema(connection)
             self._validate_schema(connection)
             yield connection
@@ -1040,6 +1054,7 @@ class ManagedCatalog:
         tags: tuple[ImapKeywordTag, ...] = (),
         allowed_mutations: tuple[MutationClass, ...] | None = None,
         drafts_mailbox: str | None = None,
+        allow_protocol_commands: bool = False,
         expected_revision: int | None = None,
     ) -> str:
         _validate_account_mutation_policy(allowed_mutations, drafts_mailbox)
@@ -1094,10 +1109,12 @@ class ManagedCatalog:
                     ),
                 )
                 connection.execute(
-                    "UPDATE managed_account SET allowed_mutations_json = ?, drafts_mailbox = ? WHERE id = ?",
+                    "UPDATE managed_account SET allowed_mutations_json = ?, drafts_mailbox = ?, "
+                    "allow_protocol_commands = ? WHERE id = ?",
                     (
                         json.dumps(allowed_mutations) if allowed_mutations is not None else None,
                         drafts_mailbox,
+                        int(allow_protocol_commands),
                         account_id,
                     ),
                 )
@@ -1409,6 +1426,7 @@ class ManagedCatalog:
             if account["allowed_mutations_json"] is not None
             else None,
             drafts_mailbox=account["drafts_mailbox"],
+            allow_protocol_commands=bool(account["allow_protocol_commands"]),
             incoming=incoming,
             outgoing=endpoints.get("outgoing"),
             incoming_binding=bindings.get("incoming", "MISSING"),
@@ -1455,6 +1473,7 @@ class ManagedCatalog:
         update_allowed_mutations: bool = False,
         drafts_mailbox: str | None = None,
         update_drafts_mailbox: bool = False,
+        allow_protocol_commands: bool | None = None,
     ) -> int:
         _validate_account_mutation_policy(allowed_mutations, drafts_mailbox)
         if expected_revision < 1:
@@ -1476,6 +1495,7 @@ class ManagedCatalog:
             outgoing is not None,
             remove_outgoing,
             save_to_sent is not None,
+            allow_protocol_commands is not None,
             update_sent_folder,
             validated_tags is not None,
             update_allowed_mutations,
@@ -1499,6 +1519,7 @@ class ManagedCatalog:
                     outgoing=outgoing,
                     remove_outgoing=remove_outgoing,
                     save_to_sent=save_to_sent,
+                    allow_protocol_commands=allow_protocol_commands,
                     sent_folder_name=sent_folder_name,
                     update_sent_folder=update_sent_folder,
                     tags=validated_tags,
@@ -1541,6 +1562,7 @@ class ManagedCatalog:
         outgoing: EmailServer | EndpointSummary | None,
         remove_outgoing: bool,
         save_to_sent: bool | None,
+        allow_protocol_commands: bool | None,
         sent_folder_name: str | None,
         update_sent_folder: bool,
         tags: tuple[ImapKeywordTag, ...] | None,
@@ -1588,6 +1610,9 @@ class ManagedCatalog:
         if save_to_sent is not None:
             assignments.append("save_to_sent = ?")
             values.append(int(save_to_sent))
+        if allow_protocol_commands is not None:
+            assignments.append("allow_protocol_commands = ?")
+            values.append(int(allow_protocol_commands))
         if update_sent_folder:
             assignments.append("sent_folder_name = ?")
             values.append(sent_folder_name)
@@ -2022,6 +2047,7 @@ class ManagedCatalog:
             if account["allowed_mutations_json"] is not None
             else None,
             drafts_mailbox=account["drafts_mailbox"],
+            allow_protocol_commands=bool(account["allow_protocol_commands"]),
             incoming=self._endpoint_summary(incoming_row),
             outgoing=self._endpoint_summary(outgoing_row) if outgoing_row is not None else None,
             binding_ids=tuple((role, bindings[role]["id"]) for role in sorted(bindings)),
@@ -2075,9 +2101,11 @@ class ManagedCatalog:
                 sent_folder_name=current.sent_folder_name,
                 allowed_mutations=list(current.allowed_mutations) if current.allowed_mutations is not None else None,
                 drafts_mailbox=current.drafts_mailbox,
+                allow_protocol_commands=current.allow_protocol_commands,
                 tags=current.tags,
             ),
             policy=current.policy,
+            authority_revision=(current.account_id, current.account_revision, current.catalog_revision),
         )
 
     def load_account(
@@ -2140,6 +2168,7 @@ class ManagedCatalog:
                         if account["allowed_mutations_json"] is not None
                         else None,
                         drafts_mailbox=account["drafts_mailbox"],
+                        allow_protocol_commands=bool(account["allow_protocol_commands"]),
                     )
                 )
             policy = self._policy_from_row(catalog)

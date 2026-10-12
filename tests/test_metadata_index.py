@@ -492,7 +492,8 @@ def test_managed_baseline_rejects_same_name_index_with_wrong_shape(tmp_path: Pat
         catalog.catalog_revision()
 
 
-def test_mutation_invalidation_removes_only_selected_mailbox_coverage(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scope", ["mailbox", "account"])
+def test_mutation_invalidation_removes_only_selected_coverage(tmp_path: Path, scope: str) -> None:
     index = MetadataIndex(tmp_path / "private" / "operational.sqlite3", "legacy")
     account_id = index.resolve_operational_account(_account())
     for mailbox in ("INBOX", "Archive"):
@@ -509,7 +510,10 @@ def test_mutation_invalidation_removes_only_selected_mailbox_coverage(tmp_path: 
             observed_at=NOW,
         )
 
-    index.invalidate_mailboxes(account_id, ("INBOX",))
+    if scope == "account":
+        index.invalidate_account(account_id)
+    else:
+        index.invalidate_mailboxes(account_id, ("INBOX",))
 
     assert (
         index.read_complete(
@@ -530,6 +534,6 @@ def test_mutation_invalidation_removes_only_selected_mailbox_coverage(tmp_path: 
             message_count=1,
         )
         is not None
-    )
+    ) == (scope == "mailbox")
     with closing(sqlite3.connect(index.path)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM message_metadata_projection").fetchone()[0] == 2

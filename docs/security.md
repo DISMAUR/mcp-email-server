@@ -9,6 +9,28 @@ An email MCP server can read private messages, modify mailboxes, send messages,
 and access local files. Review the controls on this page before exposing it to
 an MCP client or network.
 
+## Advanced protocol command authority
+
+`email_command` is a deliberately broad, per-account opt-in, disabled by default.
+It is not implied by mutation grants and cannot be enabled through MCP. IMAP
+requires organize/delete/append, no sender filter and attachment-content access;
+SMTP requires send permission and explicit `*` recipient access. Incompatible
+policy fails closed rather than silently bypassing a sender/recipient filter.
+
+Enabling it permits server-authorized mailbox DELETE, broad EXPUNGE/CLOSE and
+arbitrary protocol flags/keywords. Semantic tag mappings and focused-tool
+mailbox protections do not apply to this channel. Prefer focused tools whenever
+possible; they retain their existing protections. The protocol channel cannot
+choose another endpoint, access local files, execute programs or supply login
+credentials. The server authenticates only the selected role and rechecks current
+account identity and admission before each command and APPEND/DATA payload.
+
+Each call has a dedicated bounded connection. There is no retry, compensation or
+implicit cleanup expunge. A timeout/disconnect after transmission may leave an
+unknown outcome; do not replay automatically. Responses and mail are untrusted
+content, not instructions. See [configuration](configuration.md#advanced-protocol-access)
+and [tool semantics](tools.md#email_command-advanced-protocol-operations).
+
 ## Local management UI security
 
 `mcp-email-server ui` is a foreground, single-user local adapter. It binds
@@ -115,16 +137,17 @@ backups include plaintext `managed_secret.secret_value` values. Keep every copy
 under protection equivalent to the private original; do not upload, share, or
 treat it as a non-secret account database.
 
-The declared v3/v4-to-v5 catalog migration runs only after the existing catalog
+The declared v3/v4/v5-to-v6 catalog migration runs only after the existing catalog
 and sidecars pass the same private-file checks as a normal managed open. One
-bounded SQLite write transaction validates the exact source schema, adds the
-fixed-five global grants, inheriting account overrides, and unset draft mailbox.
-A v3 source also receives default-disabled attachment content and empty tag
-mappings. It validates the resulting v5 schema and invariants and records version
-5 last. It neither resolves nor copies secret values; failure rolls back without
-changing the advertised source version. Older runtimes reject v5. Stop all
-catalog users and retain a private, consistent backup before the first new-version
-open; see [managed catalog upgrades](configuration.md#upgrading-a-managed-catalog-to-v5).
+bounded SQLite write transaction validates the exact source schema and adds
+default-disabled protocol access. Sources before v5 also receive fixed-five global
+grants, inheriting account overrides, and an unset draft mailbox; v3 additionally
+receives default-disabled attachment content and empty tag mappings. It validates
+the resulting v6 schema and invariants and records version 6 last. It neither
+resolves nor copies secret values; failure rolls back without changing the
+advertised source version. Older runtimes reject v6. Stop all catalog users and
+retain a private, consistent backup before the first new-version open; see
+[managed catalog upgrades](configuration.md#upgrading-a-managed-catalog-to-v6).
 
 A create or rotation stores a new immutable value and commits it as active only
 if the reviewed account revision still matches. On Linux and Windows, inserting

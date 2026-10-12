@@ -43,6 +43,11 @@ bounded, rebuildable observations.
 | [`11-agent-integration-and-safe-setup.md`](11-agent-integration-and-safe-setup.md)                     | Codex/Claude Code integration, safe CLI/UI handoff, installation, and no-secret agent rules                                                 |
 | [`12-delivery-validation-and-evolution.md`](12-delivery-validation-and-evolution.md)                   | verification map, test layers, package/release gates, documentation, and future change rules                                                |
 
+The general `email_command` protocol executor retains existing focused tools,
+including `create_mailbox`. Spec 04 owns explicit account opt-in and admission;
+spec 07 owns call-scoped provider effects; spec 10 owns the MCP interface and
+local HELP; spec 12 owns delivery verification.
+
 Cross-references point to the owning document rather than duplicating its full
 contract. This README is the only ordered navigation map.
 

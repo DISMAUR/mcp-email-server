@@ -6,11 +6,13 @@ from functools import cache
 from mcp_email_server.adapters.management import LocalManagementBackend
 from mcp_email_server.adapters.metadata import LocalMetadataBackend, LocalMetadataProjectionFactory
 from mcp_email_server.adapters.mutations import LocalMutationBackend, LocalMutationProjectionFactory
+from mcp_email_server.adapters.protocol import LocalProtocolBackend
 from mcp_email_server.adapters.reads import LocalArtifactWriter, LocalReadBackend
 from mcp_email_server.application.accounts import EffectiveAccountQueryService, EffectiveConfigurationQueryService
 from mcp_email_server.application.management import ManagementServices
 from mcp_email_server.application.metadata import MetadataQueryService
 from mcp_email_server.application.mutations import MutationServices
+from mcp_email_server.application.protocol import ProtocolCommandService
 from mcp_email_server.application.reads import ReadServices
 from mcp_email_server.large_results import LocalLargeResultWriter, local_large_results_supported
 
@@ -26,6 +28,7 @@ class ApplicationRuntime:
     mutations: MutationServices
     reads: ReadServices
     large_results: LocalLargeResultWriter | None
+    protocol_commands: ProtocolCommandService | None = None
 
     async def aclose(self) -> None:
         """Close process-scoped resources and remove private result artifacts."""
@@ -64,6 +67,7 @@ def get_application_runtime() -> ApplicationRuntime:
             large_results,
         ),
         large_results=large_results,
+        protocol_commands=ProtocolCommandService(LocalProtocolBackend()),
     )
 
 

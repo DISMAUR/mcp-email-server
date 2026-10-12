@@ -415,6 +415,7 @@ async def _create_account(_request: Request, state: LocalUiState, payload: Creat
             sent_folder_name=payload.sent_folder_name,
             allowed_mutations=payload.allowed_mutations,
             drafts_mailbox=payload.drafts_mailbox,
+            allow_protocol_commands=payload.allow_protocol_commands,
             tags=payload.tags,
         ),
     )

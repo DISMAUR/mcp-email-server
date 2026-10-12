@@ -70,12 +70,12 @@ apply. Do not pass them through MCP or chat.
 
 ### Upgrading an existing managed catalog
 
-Managed v3/v4 catalogs migrate to v5 on the first access by the new application.
-Existing accounts retain full mutation grants by default; no permission reset
-or account re-entry is required. Stop all older catalog users, keep a private
+Managed v3/v4/v5 catalogs migrate to v6 on the first access by the new application.
+Existing mutation grants are preserved, and advanced protocol access stays off;
+no account re-entry is required. Stop all older catalog users, keep a private
 consistent backup, and upgrade UI, CLI, and MCP together before restarting the
-clients. An older runtime cannot read v5, so a package-only downgrade is not a
-rollback. See the [managed upgrade steps](configuration.md#upgrading-a-managed-catalog-to-v5).
+clients. An older runtime cannot read v6, so a package-only downgrade is not a
+rollback. See the [managed upgrade steps](configuration.md#upgrading-a-managed-catalog-to-v6).
 Legacy TOML/environment users are not automatically switched to managed mode.
 
 ## Configure an account with the UI
@@ -137,6 +137,11 @@ operating-system keyring. Managed mode never falls back to TOML plaintext. The
 interface is not a mail
 client and never exposes message content. The same cleanup and headless
 operations remain available through the managed CLI below.
+
+Advanced protocol commands are disabled by default. Most users should leave
+**Allow advanced protocol commands** unchecked under **Account permissions**;
+ordinary tools do not require it. Review [advanced access](configuration.md#advanced-protocol-access)
+before enabling its broader raw mailbox, expunge and message capabilities.
 
 ## Configure an account with the managed CLI
 

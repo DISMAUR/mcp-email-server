@@ -320,6 +320,7 @@ class EmailSettings(AccountAttributes):
     tags: tuple[ImapKeywordTag, ...] = ()
     allowed_mutations: list[MutationClass] | None = None
     drafts_mailbox: str | None = None
+    allow_protocol_commands: bool = False
 
     @model_validator(mode="after")
     def validate_tags(self) -> EmailSettings:
@@ -364,6 +365,7 @@ class EmailSettings(AccountAttributes):
         sent_folder_name: str | None = None,
         allowed_mutations: list[MutationClass] | None = None,
         drafts_mailbox: str | None = None,
+        allow_protocol_commands: bool = False,
     ) -> EmailSettings:
         for candidate in (password, imap_password, smtp_password):
             if candidate == keyring_store.SENTINEL:
@@ -403,6 +405,7 @@ class EmailSettings(AccountAttributes):
             sent_folder_name=sent_folder_name,
             allowed_mutations=allowed_mutations,
             drafts_mailbox=drafts_mailbox,
+            allow_protocol_commands=allow_protocol_commands,
         )
 
     @classmethod
@@ -427,6 +430,7 @@ class EmailSettings(AccountAttributes):
         - MCP_EMAIL_SERVER_SMTP_VERIFY_SSL (default: true)
         - MCP_EMAIL_SERVER_SAVE_TO_SENT (default: true)
         - MCP_EMAIL_SERVER_SENT_FOLDER_NAME (default: auto-detect)
+        - MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS (default: false)
         """
         # Check if minimum required environment variables are set
         email_address = os.getenv("MCP_EMAIL_SERVER_EMAIL_ADDRESS")
@@ -471,6 +475,7 @@ class EmailSettings(AccountAttributes):
                 save_to_sent=_parse_bool_env(os.getenv("MCP_EMAIL_SERVER_SAVE_TO_SENT"), True),
                 sent_folder_name=os.getenv("MCP_EMAIL_SERVER_SENT_FOLDER_NAME"),
                 drafts_mailbox=os.getenv("MCP_EMAIL_SERVER_DRAFTS_MAILBOX"),
+                allow_protocol_commands=_parse_bool_env(os.getenv("MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS"), False),
                 allowed_mutations=(
                     list(
                         parse_mutations([

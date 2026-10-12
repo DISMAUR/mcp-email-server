@@ -33,6 +33,52 @@ before release.
 | agent integration and safe setup handoff           | 11                     | Codex/Claude Code install fixtures, scenario, drift, and no-secret tests                        |
 | release artifacts and container delivery           | 12                     | exact source/version, restricted image, raw stdio, multi-platform, and publication gates        |
 
+### Protocol command delivery gate
+
+The accepted executor contract is owned by specs 04, 07, and 10. Before release,
+verify account opt-in default/round-trip/migration and CLI/UI parity; exact
+preservation of the existing 20 MCP definitions plus one tool; local HELP without
+secrets/network; real stdio SELECT/UID COPY and an additional unwrapped primitive;
+APPEND and SMTP DATA framing; Unicode mailbox names; independent call/account
+state; stop-on-error, revocation, cancellation, receive bounds, unknown outcomes,
+no replay, no implicit cleanup expunge, and metadata invalidation.
+
+Run normal check/test/docs/GreenMail gates and relevant frontend/browser/artifact
+gates for the account editor. Verify the locked and declared minimum MCP SDK
+boundary. Record a separate model-driven HELP/COPY smoke result if available;
+protocol tests alone do not prove agent discovery quality.
+
+Protocol acceptance traceability (this branch, not an already released version):
+
+| Acceptance | Implementation                                                                                                                                                          | Verification                                                                                                                                                                | Published documentation                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 04-P1      | `config.py`, `managed.py`, `application/management.py`, `adapters/{authority,management,protocol}.py`, `cli.py`, `web_ui/`, `frontend/src/components/AccountsPanel.tsx` | `tests/test_protocol_commands.py`, `test_managed_cli.py`, `test_web_ui_management.py`, account editor unit tests and `frontend/e2e/local-management.spec.ts`                | `docs/configuration.md`, `security.md`, `transports.md`, `getting-started.md` |
+| 07-P1      | `application/protocol.py`, `adapters/protocol.py`, `metadata_index.py`                                                                                                  | `tests/test_protocol_commands.py` loopback IMAP/SMTP, cancellation, limits, late secret and revocation tests; `test_metadata_index.py`; `tests/e2e/test_stdio_greenmail.py` | `docs/tools.md`, `security.md`, `troubleshooting.md`                          |
+| 08-P1      | `managed.py` exact v6 schema and transactional v3/v4/v5 migration                                                                                                       | `tests/test_managed_catalog.py`, `test_mutation_class_policy.py`, `test_protocol_commands.py` v5 migration and rollback                                                     | `docs/configuration.md`, `security.md`, `troubleshooting.md`                  |
+| 10-P1      | `app.py`, `application/protocol.py`, `runtime.py`                                                                                                                       | `tests/fixtures/mcp_catalog.json`, `test_protocol_commands.py`, `test_stdio_protocol.py`, `test_mcp_tools.py`, GreenMail                                                    | `docs/tools.md`                                                               |
+
+Independent protocol review identified one SMTP parser ambiguity: a malformed or
+overlong final reply must be `unknown`, not a confirmed rejection. The adapter
+now treats only 4xx/5xx exception replies as confirmed rejection, with loopback
+regressions for malformed and overlong replies after DATA. No other material
+findings remained in that review.
+
+A separate model-assisted smoke discovered the tool from its schema/description,
+called local HELP and HELP UID COPY, and constructed a validated SELECT/UID COPY
+request preserving originals. This verifies discovery and request planning, not
+provider execution; actual copying is covered independently by GreenMail. The
+smoke's UID-versus-sequence wording friction was resolved by displaying `uid-set`
+in UID help signatures.
+
+Local delivery verification on 2026-10-12: `make check`, `make docs-test`,
+`make frontend` (48 unit tests), `make test-browser` (3 browser scenarios),
+`make test-e2e` (20 GreenMail tests), and `make test` (1,770 passed, 38 skipped;
+88.07% coverage) passed. The full Python suite includes sdist/wheel inventory,
+Node-free rebuild, isolated-install UI smoke and asset-drift checks. The protocol,
+MCP catalog and raw stdio suites also passed with MCP 1.23.0 in an isolated
+environment (152 tests; one dependency forward-reference warning). Local tests
+ran on Linux; native Windows execution remains the repository CI gate.
+
 ### Mutation-class policy delivery gate
 
 This accepted alternative to #209 is not declared shipped by this specification.

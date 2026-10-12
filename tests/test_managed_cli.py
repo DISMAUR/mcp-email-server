@@ -1223,3 +1223,26 @@ def test_account_add_validates_non_secret_endpoint_before_secret_read(monkeypatc
         "details": {},
     }
     read_secret.assert_not_called()
+
+
+def test_protocol_opt_in_cli_round_trip_and_omitted_update(monkeypatch, tmp_path, fake_keyring):
+    parent = _private_directory(tmp_path / "protocol-cli")
+    database = parent / "catalog.sqlite3"
+    monkeypatch.setenv("MCP_EMAIL_SERVER_CONFIG_PATH", str(parent / "config.toml"))
+    runner = CliRunner()
+    assert runner.invoke(app, ["config", "init", "--database", str(database)]).exit_code == 0
+    added = runner.invoke(app, [*_base_account_args(), "--allow-protocol-commands"], input="synthetic-secret\n")
+    assert added.exit_code == 0, added.output
+    catalog = ManagedCatalog(database)
+    assert catalog.show_account("alice").allow_protocol_commands
+    shown = runner.invoke(app, ["account", "show", "alice"])
+    assert shown.exit_code == 0, shown.output
+    assert "allow_protocol_commands=true" in shown.output
+    updated = runner.invoke(app, ["account", "update", "alice", "--expected-revision", "2", "--full-name", "Renamed"])
+    assert updated.exit_code == 0, updated.output
+    assert catalog.show_account("alice").allow_protocol_commands
+    disabled = runner.invoke(
+        app, ["account", "update", "alice", "--expected-revision", "3", "--no-allow-protocol-commands"]
+    )
+    assert disabled.exit_code == 0, disabled.output
+    assert not catalog.show_account("alice").allow_protocol_commands

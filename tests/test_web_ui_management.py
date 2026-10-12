@@ -242,6 +242,7 @@ async def test_create_account_persists_mutation_grants_and_drafts_mailbox(
                 credentials={"incoming": "synthetic-password", "outgoing": None},
                 allowed_mutations=grants,
                 drafts_mailbox="Localized Drafts",
+                allow_protocol_commands=True,
             ),
         )
         assert response.status_code == 200, response.text
@@ -251,9 +252,11 @@ async def test_create_account_persists_mutation_grants_and_drafts_mailbox(
         await client.aclose()
     assert readback.json()["allowed_mutations"] == grants
     assert readback.json()["drafts_mailbox"] == "Localized Drafts"
+    assert readback.json()["allow_protocol_commands"] is True
     persisted = catalog.show_account("alice")
     assert persisted.allowed_mutations == (tuple(grants) if grants is not None else None)
     assert persisted.drafts_mailbox == "Localized Drafts"
+    assert persisted.allow_protocol_commands is True
 
 
 @pytest.mark.asyncio
@@ -319,6 +322,7 @@ async def test_update_account_and_policy_requests_include_tags_and_attachment_co
     ]
     command = management.accounts.update.call_args.args[0]
     assert command.tags == (tag,)
+    assert command.allow_protocol_commands is None  # Omission preserves the current opt-in.
     assert updated_policy.status_code == 200, updated_policy.text
     policy = management.policy.update.call_args.args[0]
     assert policy.enable_attachment_download is False

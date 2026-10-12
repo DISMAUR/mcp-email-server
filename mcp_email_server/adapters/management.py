@@ -267,6 +267,7 @@ class LocalManagementBackend:
             sent_folder_name=account.sent_folder_name,
             allowed_mutations=tuple(account.allowed_mutations) if account.allowed_mutations is not None else None,
             drafts_mailbox=account.drafts_mailbox,
+            allow_protocol_commands=account.allow_protocol_commands,
             tags=account.tags,
         )
         cls._validate_legacy_account_snapshot(snapshot)
@@ -376,6 +377,7 @@ class LocalManagementBackend:
                 save_to_sent=cls._bool_environment("MCP_EMAIL_SERVER_SAVE_TO_SENT", True),
                 sent_folder_name=os.getenv("MCP_EMAIL_SERVER_SENT_FOLDER_NAME"),
                 drafts_mailbox=os.getenv("MCP_EMAIL_SERVER_DRAFTS_MAILBOX"),
+                allow_protocol_commands=cls._bool_environment("MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS", False),
                 allowed_mutations=(
                     list(
                         parse_mutations([

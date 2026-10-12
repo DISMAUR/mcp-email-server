@@ -50,6 +50,47 @@ change is intentionally reviewed as a public contract change. MCP initialization
 advertises the installed `mcp-email-server` application version, never the MCP
 SDK dependency version, and raw protocol tests lock that identity.
 
+## General Email Protocol Commands
+
+Add one `email_command` tool without changing the existing 20 tool contracts,
+including standalone `create_mailbox`. This is a protocol executor, not a
+registry of business operations: UID COPY and other supported primitives do not
+require separate application workflows. Spec 04 owns admission; spec 07 owns
+effect and connection lifecycle rules.
+
+The input is `commands`, an ordered list of `{command, data?}`, optional
+`account_name` (required for execution), and `protocol` (`imap` by default or
+`smtp`). Each command is one untagged protocol line with no CR/LF or literal
+length marker; message payload is separate UTF-8 `data` for APPEND/DATA. Validate
+the complete request before obtaining authority. Reject unsupported commands,
+caller authentication/TLS/teardown, arbitrary endpoints, and malformed framing.
+Unknown extension support is not inferred from server CAPABILITY.
+
+A single `HELP` or `HELP <command>` is local and account-independent. Help is
+not forwarded to IMAP/SMTP and cannot be mixed with execution. It describes the
+actual supported syntax, state requirements, payloads, effects, and examples.
+The outer tool description teaches agent-directed discovery, account selection,
+call-scoped state, result interpretation, and no automatic replay. Dedicated
+tools remain the preferred convenience route when they cover a workflow.
+
+Return an envelope with `status` (`completed`, `stopped`, `unknown`), ordered
+`results`, `error`, and `warnings`. Each result identifies the input index and
+`ok`, `error`, `unknown`, or `not_attempted`, preserving protocol codes and
+bounded response order/literal boundaries. Binary response blocks are base64.
+Statuses describe protocol evidence, not fabricated per-message success or
+end-recipient SMTP delivery. An error does not undo earlier commands; missing
+completion after transmission is unknown. MCP isError is false only for
+completed requests, and text JSON agrees with structured content.
+
+Bound batches to 20 commands, command text to 64 KiB in total, input message data
+to 1 MiB in total, received command responses to 512 KiB per connection, and
+IMAP response blocks to 4,096. Canonical protocol results are capped at 3 MiB to
+leave room for both MCP representations and escaping under the 8 MiB final result
+boundary. Reuse the 2 MiB stdio frame and provider timeout boundaries.
+Oversized output stops subsequent commands without turning possible remote
+effects into safe-to-retry failures. Annotations conservatively advertise a
+potentially destructive, non-idempotent, open-world mutation.
+
 ## Agent Discovery and Tool Hints
 
 Account discovery projects configuration models into one explicit non-secret
@@ -216,6 +257,14 @@ filesystem; it does not turn this server into an MCP App or remote management
 plane.
 
 ## Acceptance Criteria
+
+- **10-P1:** Exactly one `email_command` is added without changing the prior 20 tool
+  definitions. Its strict three-field input preserves JSON-looking strings,
+  rejects unknown arguments and command framing before authority access, and
+  provides local HELP without constructing a runtime. Ordered statuses and
+  literal blocks agree between JSON text and structured content; isError is
+  false only for completed sequences. Help documents syntax and limits, not a
+  promise of universal server extension support.
 
 1. A complete exact catalog snapshot covers names, descriptions, input/output
    schemas, annotations, resources, visibility, and result shapes.
