@@ -774,7 +774,19 @@ Both attachment tools accept filenames returned by `get_emails_content`,
 including single-part messages whose top-level body is a named attachment
 (such as an `application/zip` report with `Content-Disposition: attachment`).
 A multipart envelope is not required. Named inline parts and parts with a
-`Content-Type` filename are also supported.
+`Content-Type` filename are also supported. Lookup uses the same attachment
+roots as the list: files inside an attached message or multipart attachment
+are not selected independently and cannot shadow an outer attachment. Exact
+filenames take precedence over Unicode NFC-normalized fallback matches; for
+identical duplicate names, the first listed match is selected.
+
+Ordinary file attachments preserve their decoded bytes. An attached
+`message/rfc822` (`.eml`) exports the encapsulated message, including its headers
+and nested attachments, without the outer attachment wrapper. A named multipart
+attachment (such as `.mhtml`) exports its MIME content headers, boundary, and
+complete child tree. These structured exports are reserialized with CRLF line
+endings and may normalize MIME formatting; they are not byte-exact archival
+copies of the original wire representation.
 
 ### `get_attachment_content`
 

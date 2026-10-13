@@ -33,6 +33,18 @@ before release.
 | agent integration and safe setup handoff           | 11                     | Codex/Claude Code install fixtures, scenario, drift, and no-secret tests                        |
 | release artifacts and container delivery           | 12                     | exact source/version, restricted image, raw stdio, multi-platform, and publication gates        |
 
+### Attachment retrieval interoperability gate
+
+Spec 06 attachment-root selection and export semantics are implemented in
+`emails/classic.py` and shared by the download and embedded-content services.
+`tests/test_email_attachments.py` covers top-level attachments, empty payloads,
+structured `.eml`/multipart exports, subtree shadowing, exact Unicode filename
+precedence and normalized fallback. `tests/e2e/test_stdio_greenmail.py` verifies
+listing, both MCP transfer modes, decoded bytes/MIME-tree preservation and unread
+state through real SMTP/IMAP. Published behavior is documented in `docs/tools.md`.
+Existing application, artifact, MCP and native Windows suites remain the policy,
+size-limit, serialized-result and filesystem-security gates.
+
 ### Protocol command delivery gate
 
 The accepted executor contract is owned by specs 04, 07, and 10. Before release,

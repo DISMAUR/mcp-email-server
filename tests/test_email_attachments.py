@@ -5,6 +5,7 @@ import base64
 import re
 import unicodedata
 from email import encoders
+from email.message import EmailMessage
 from email.mime.application import MIMEApplication
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -632,6 +633,98 @@ async def test_single_part_body_is_not_an_attachment(email_client) -> None:
     ):
         await email_client.fetch_attachment("1", "report.zip")
     mock_imap.logout.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["capsule.eml", "gallery.mhtml"])
+@pytest.mark.parametrize("top_level", [False, True])
+async def test_structured_attachment_download_preserves_mime_tree(email_client, tmp_path, filename, top_level):
+    source = BytesParser(policy=default).parsebytes(_build_forward_source_email())
+    part = next(part for part in source.walk() if part.get_filename() == filename)
+    if top_level:
+        source = part
+        source["From"] = "outer@example.com"
+        source["Bcc"] = "outer-private@example.com"
+    raw_email = source.as_bytes(policy=SMTP_POLICY)
+    assert filename in email_client._parse_email_data(raw_email, "1")["attachments"]
+    mock_imap = AsyncMock()
+    mock_imap.login.return_value = MagicMock(result="OK", lines=[])
+    mock_imap.select.return_value = ("OK", [b"1"])
+    fetch_data = [b"1 FETCH (BODY[] {%d}" % len(raw_email), bytearray(raw_email), b")"]
+    destination = tmp_path / filename
+    with (
+        patch.object(email_client, "_connect_imap", AsyncMock(return_value=mock_imap)),
+        patch.object(email_client, "_fetch_email_with_formats", AsyncMock(return_value=fetch_data)),
+    ):
+        fetched = await email_client.fetch_attachment("1", filename)
+        downloaded = await email_client.download_attachment("1", filename, str(destination))
+    assert destination.read_bytes() == fetched["content"]
+    assert downloaded["size"] == len(fetched["content"]) > 0
+    assert fetched["mime_type"] == part.get_content_type()
+    restored = BytesParser(policy=default).parsebytes(fetched["content"])
+    assert restored["Bcc"] is None
+    if filename == "capsule.eml":
+        assert restored["Subject"] == "Inner capsule"
+        assert restored["From"] == "original@example.com"
+        assert restored.get_payload(decode=True).rstrip() == b"inner capsule body"
+        assert restored.get_content_type() == "text/plain"
+    else:
+        assert restored.get_content_type() == "multipart/related"
+        assert restored["From"] is None
+        assert restored.get_boundary() == "INNERREL"
+        image = next(part for part in restored.walk() if part.get_filename() == "pic.png")
+        assert image.get_payload(decode=True) == base64.b64decode(_FORWARD_INLINE_PNG)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capsule_named", [False, True])
+async def test_attachment_lookup_does_not_enter_attached_messages(email_client, capsule_named):
+    inner = EmailMessage()
+    inner.set_content("Nested body")
+    inner.add_attachment(b"INNER", maintype="application", subtype="octet-stream", filename="report.bin")
+    inner.add_attachment(b"HIDDEN", maintype="application", subtype="octet-stream", filename="hidden.bin")
+    outer = EmailMessage()
+    outer.set_content("Outer body")
+    outer.add_attachment(inner, filename="capsule.eml" if capsule_named else None)
+    outer.add_attachment(b"OUTER", maintype="application", subtype="octet-stream", filename="report.bin")
+    raw_email = outer.as_bytes()
+    assert email_client._parse_email_data(raw_email, "1")["attachments"] == (
+        ["capsule.eml", "report.bin"] if capsule_named else ["report.bin"]
+    )
+    mock_imap = AsyncMock()
+    mock_imap.login.return_value = MagicMock(result="OK", lines=[])
+    mock_imap.select.return_value = ("OK", [b"1"])
+    fetch_data = [b"1 FETCH (BODY[] {%d}" % len(raw_email), bytearray(raw_email), b")"]
+    with (
+        patch.object(email_client, "_connect_imap", AsyncMock(return_value=mock_imap)),
+        patch.object(email_client, "_fetch_email_with_formats", AsyncMock(return_value=fetch_data)),
+    ):
+        result = await email_client.fetch_attachment("1", "report.bin")
+        assert result["content"] == b"OUTER"
+        with pytest.raises(ValueError, match="not found"):
+            await email_client.fetch_attachment("1", "hidden.bin")
+
+
+@pytest.mark.asyncio
+async def test_attachment_lookup_prefers_exact_unicode_filename(email_client):
+    outer = EmailMessage()
+    outer.set_content("Body")
+    names = ["cafe\u0301.bin", "café.bin"]
+    for index, name in enumerate(names):
+        outer.add_attachment(str(index).encode(), maintype="application", subtype="octet-stream", filename=name)
+    raw_email = outer.as_bytes()
+    assert email_client._parse_email_data(raw_email, "1")["attachments"] == names
+    mock_imap = AsyncMock()
+    mock_imap.login.return_value = MagicMock(result="OK", lines=[])
+    mock_imap.select.return_value = ("OK", [b"1"])
+    fetch_data = [b"1 FETCH (BODY[] {%d}" % len(raw_email), bytearray(raw_email), b")"]
+    with (
+        patch.object(email_client, "_connect_imap", AsyncMock(return_value=mock_imap)),
+        patch.object(email_client, "_fetch_email_with_formats", AsyncMock(return_value=fetch_data)),
+    ):
+        for index, name in enumerate(names):
+            result = await email_client.fetch_attachment("1", name)
+            assert result["content"] == str(index).encode()
 
 
 @pytest.mark.asyncio
