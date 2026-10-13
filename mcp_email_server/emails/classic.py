@@ -1374,6 +1374,40 @@ class EmailClient:
             return
         yield part, False
 
+    def _find_attachment_part(self, message: Message, name: str) -> Message | None:
+        """Match listed attachment roots, preferring exact names over NFC aliases."""
+        normalized_name = self._normalize_attachment_name(name)
+        fallback = None
+        for part, is_attachment in self._iter_content_parts(message):
+            if not is_attachment:
+                continue
+            filename = part.get_filename()
+            if not isinstance(filename, str) or not filename:
+                continue
+            if filename == name:
+                return part
+            if fallback is None and self._normalize_attachment_name(filename) == normalized_name:
+                fallback = part
+        return fallback
+
+    @staticmethod
+    def _attachment_content(part: Message) -> bytes | None:
+        """Decode leaves or serialize a structured attachment as a usable MIME file.
+
+        Encapsulated messages export the inner message, without the attachment
+        wrapper. Multipart attachments need their own content headers and boundary
+        to remain parseable. Structured exports use CRLF and may normalize MIME
+        serialization; ordinary leaf payloads retain their exact decoded bytes.
+        """
+        if part.get_content_type() == "message/rfc822":
+            payload = part.get_payload()
+            if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], Message):
+                return payload[0].as_bytes(policy=SMTP_POLICY.clone(refold_source="none"))
+            return None
+        if part.get_content_maintype() == "multipart" and part.is_multipart():
+            return _strip_to_content_headers(part).as_bytes(policy=SMTP_POLICY.clone(refold_source="none"))
+        return _decoded_payload(part)
+
     @staticmethod
     def _decode_text_part(part: Message) -> str:
         """Decode a MIME text part without losing the message on a bad charset."""
@@ -2243,7 +2277,7 @@ class EmailClient:
             except Exception:
                 logger.info("IMAP logout failed")
 
-    async def fetch_attachment(  # noqa: C901 - bounded MIME selection and provider cleanup
+    async def fetch_attachment(
         self,
         email_id: str,
         attachment_name: str,
@@ -2292,25 +2326,10 @@ class EmailClient:
             parser = BytesParser(policy=default)
             email_message = parser.parsebytes(raw_email)
 
-            # Find the attachment
-            attachment_data: bytes | None = None
-            mime_type = None
-            normalized_attachment_name = self._normalize_attachment_name(attachment_name)
-
-            if email_message.is_multipart():
-                for part in email_message.walk():
-                    # Match attachments listed by ``_parse_email_data`` — this includes
-                    # inline-disposition parts with a filename (e.g. iOS Mail photos).
-                    if not self._is_attachment_part(part):
-                        continue
-                    filename = part.get_filename()
-                    if not isinstance(filename, str):
-                        continue
-                    if self._normalize_attachment_name(filename) == normalized_attachment_name:
-                        attachment_data = _decoded_payload(part)
-                        mime_type = part.get_content_type()
-                        break
-
+            # Use the same roots as the list, including single-part messages,
+            # without allowing a nested attachment to shadow a listed filename.
+            part = self._find_attachment_part(email_message, attachment_name)
+            attachment_data = self._attachment_content(part) if part is not None else None
             if attachment_data is None:
                 msg = f"Attachment '{attachment_name}' not found in email {email_id}"
                 logger.error(msg)
@@ -2319,7 +2338,7 @@ class EmailClient:
             return {
                 "email_id": email_id,
                 "attachment_name": attachment_name,
-                "mime_type": mime_type or "application/octet-stream",
+                "mime_type": part.get_content_type() if part is not None else "application/octet-stream",
                 "content": attachment_data,
             }
 

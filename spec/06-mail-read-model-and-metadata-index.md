@@ -240,6 +240,17 @@ local-only response. Logs and remote/provider errors do not include it. Partial
 files are removed when their identity can be proven; otherwise the operation
 returns a bounded cleanup warning without deleting an unverified path.
 
+Attachment lookup MUST use the same attachment-root traversal as body retrieval:
+include a named top-level single-part attachment and prune attachment subtrees.
+A nested file inside an attached message or multipart entity MUST NOT shadow an
+outer listed filename. Exact filenames take precedence over NFC-normalized
+fallback matches; identical duplicate names retain first-match ordering.
+Leaf attachments return decoded payload bytes. A `message/rfc822` attachment
+exports its encapsulated message without the wrapper; a named multipart
+attachment exports its content headers and complete MIME tree without outer
+mail envelope headers. Structured exports use CRLF and may normalize MIME
+serialization rather than promising byte-exact wire preservation.
+
 `get_attachment_content` shares the same MIME lookup, sender allowlist, and
 current account authority as attachment materialization, but performs no
 filesystem write. It has the independent `enable_attachment_content` policy,

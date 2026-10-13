@@ -1583,6 +1583,125 @@ async def test_current_stdio_server_against_greenmail(tmp_path: Path) -> None:
             assert Path(download["saved_path"]) == attachment_download
             assert attachment_download.read_bytes() == attachment_bytes
 
+            # A report can be the entire MIME message, with no multipart wrapper.
+            report_subject = f"mcp-e2e-single-part-{run_id}"
+            report_bytes = b"PK\x03\x04single-part report\x00\xff"
+            report = EmailMessage()
+            report["From"] = ALICE[0]
+            report["To"] = BOB[0]
+            report["Subject"] = report_subject
+            report.set_content(
+                report_bytes, maintype="application", subtype="zip", disposition="attachment", filename="report.zip"
+            )
+            assert not report.is_multipart()
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as smtp:
+                smtp.login(*ALICE)
+                smtp.send_message(report)
+            received_report = _wait_for_message(BOB, "INBOX", report_subject)
+            assert not received_report.message.is_multipart()
+            report_metadata = await _metadata_for_subject(session, "bob", report_subject)
+            report_content = await _call_tool(
+                session,
+                "get_emails_content",
+                {"account_name": "bob", "email_ids": [report_metadata["email_id"]], "mark_as_read": False},
+            )
+            assert report_content["emails"][0]["attachments"] == ["report.zip"]
+            report_arguments = {
+                "account_name": "bob",
+                "email_id": report_metadata["email_id"],
+                "attachment_name": "report.zip",
+            }
+            report_attachment = await session.call_tool("get_attachment_content", arguments=report_arguments)
+            assert report_attachment.isError is not True, _text_content(report_attachment)
+            report_resource = report_attachment.content[0]
+            assert isinstance(report_resource, EmbeddedResource)
+            assert isinstance(report_resource.resource, BlobResourceContents)
+            assert report_resource.resource.mimeType == "application/zip"
+            assert base64.b64decode(report_resource.resource.blob) == report_bytes
+            report_destination = tmp_path / "report.zip"
+            report_download = await _call_tool(
+                session,
+                "download_attachment",
+                {**report_arguments, "save_path": str(report_destination)},
+            )
+            assert report_download["size"] == len(report_bytes)
+            assert report_destination.read_bytes() == report_bytes
+            assert "\\Seen" not in _wait_for_message(BOB, "INBOX", report_subject).flags
+
+            # Structured attachments remain downloadable as complete MIME trees.
+            package_subject = f"mcp-e2e-attachment-tree-{run_id}"
+            inner = EmailMessage()
+            inner["Subject"] = "Inner report"
+            inner.set_content("Inner body")
+            inner.add_attachment(b"INNER", maintype="application", subtype="zip", filename="report.zip")
+            gallery = EmailMessage()
+            gallery.set_content("<p>Gallery</p>", subtype="html")
+            gallery.add_related(b"IMAGE", maintype="image", subtype="png", filename="photo.png")
+            gallery.add_header("Content-Disposition", "attachment", filename="gallery.mhtml")
+            package = EmailMessage()
+            package["From"] = ALICE[0]
+            package["To"] = BOB[0]
+            package["Subject"] = package_subject
+            package.set_content("Outer body")
+            package.add_attachment(inner, filename="report.eml")
+            package.attach(gallery)
+            package.add_attachment(b"OUTER", maintype="application", subtype="zip", filename="report.zip")
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as smtp:
+                smtp.login(*ALICE)
+                smtp.send_message(package)
+            _wait_for_message(BOB, "INBOX", package_subject)
+            package_metadata = await _metadata_for_subject(session, "bob", package_subject)
+            package_content = await _call_tool(
+                session,
+                "get_emails_content",
+                {"account_name": "bob", "email_ids": [package_metadata["email_id"]], "mark_as_read": False},
+            )
+            assert package_content["emails"][0]["attachments"] == ["report.eml", "gallery.mhtml", "report.zip"]
+            for filename, mime_type in (
+                ("report.eml", "message/rfc822"),
+                ("gallery.mhtml", "multipart/related"),
+                ("report.zip", "application/zip"),
+            ):
+                arguments = {
+                    "account_name": "bob",
+                    "email_id": package_metadata["email_id"],
+                    "attachment_name": filename,
+                }
+                content_result = await session.call_tool("get_attachment_content", arguments=arguments)
+                assert content_result.isError is not True, _text_content(content_result)
+                resource = content_result.content[0]
+                assert isinstance(resource, EmbeddedResource)
+                assert isinstance(resource.resource, BlobResourceContents)
+                assert resource.resource.mimeType == mime_type
+                content_bytes = base64.b64decode(resource.resource.blob)
+                destination = tmp_path / f"package-{filename}"
+                downloaded = await _call_tool(
+                    session, "download_attachment", {**arguments, "save_path": str(destination)}
+                )
+                assert destination.read_bytes() == content_bytes
+                assert downloaded["size"] == len(content_bytes) > 0
+                if filename == "report.zip":
+                    assert content_bytes == b"OUTER"
+                else:
+                    restored = BytesParser(policy=policy.default).parsebytes(content_bytes)
+                    if filename == "report.eml":
+                        assert restored["Subject"] == "Inner report"
+                        assert (
+                            next(part for part in restored.walk() if part.get_filename() == "report.zip").get_payload(
+                                decode=True
+                            )
+                            == b"INNER"
+                        )
+                    else:
+                        assert restored.get_content_type() == "multipart/related"
+                        assert (
+                            next(part for part in restored.walk() if part.get_filename() == "photo.png").get_payload(
+                                decode=True
+                            )
+                            == b"IMAGE"
+                        )
+            assert "\\Seen" not in _wait_for_message(BOB, "INBOX", package_subject).flags
+
             move_result = await _call_tool(
                 session,
                 "move_emails",
