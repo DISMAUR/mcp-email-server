@@ -123,9 +123,12 @@ and output.
 
 Do not write unrelated output to stdout when wrapping a stdio server process,
 because stdout carries newline-delimited UTF-8 MCP JSON-RPC frames. Local Email
-App V2 rejects malformed UTF-8/JSON and frames larger than 2 MiB with bounded,
+App V2 rejects malformed UTF-8/JSON and frames larger than 32 MiB with bounded,
 redacted diagnostics, remains usable after a rejected frame, propagates MCP
-cancellation, and cancels in-flight work before cleanup on EOF.
+cancellation, and cancels in-flight work before cleanup on EOF. The 32 MiB frame
+ceiling exists so one compose request can carry the 20 MiB decoded
+`inline_attachments` budget as base64 (about 26.7 MiB) plus its JSON framing,
+body, and headers; see [Inbound MCP message size](security.md#inbound-mcp-message-size).
 
 The process resolves the bootstrap mode at startup. An explicitly selected
 managed mode loads only the exact supported catalog schema and its active secret

@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 from dataclasses import replace
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, TextContent
 
 from mcp_email_server import app as app_module
@@ -36,6 +38,7 @@ from mcp_email_server.application.mutations import (
     AppendMutationOutcome,
     ArchiveMutationOutcome,
     BatchMutationOutcome,
+    InlineAttachment,
     MoveMutationOutcome,
     RecipientPolicyDeniedError,
     SendMutationOutcome,
@@ -1528,3 +1531,107 @@ async def test_attachment_blob_survives_fastmcp_tool_adapter_without_structured_
     assert isinstance(embedded.resource, BlobResourceContents)
     assert embedded.resource.blob == "cG5n"
     assert embedded.meta == {"filename": "photo.png", "size": 3}
+
+
+# --- Inline (base64) attachments ------------------------------------------------
+
+_INLINE_PDF_BASE64 = base64.b64encode(b"%PDF-1.4\n%%EOF\n").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_compose_tools_advertise_bounded_inline_attachments_and_forward_does_not() -> None:
+    tools = {tool.name: tool.inputSchema for tool in await app_module.mcp.list_tools()}
+    for tool_name in ("send_email", "save_draft", "save_to_mailbox"):
+        schema = tools[tool_name]
+        inline = schema["properties"]["inline_attachments"]
+        array = next(item for item in inline["anyOf"] if item.get("type") == "array")
+        assert array["maxItems"] == APPLICATION_LIMITS.attachments
+        assert array["items"] == {"$ref": "#/$defs/InlineAttachmentInput"}
+        item = schema["$defs"]["InlineAttachmentInput"]
+        assert item["additionalProperties"] is False
+        assert item["required"] == ["filename", "content_base64"]
+        assert item["properties"]["filename"]["maxLength"] == APPLICATION_LIMITS.attachment_filename_bytes
+        assert item["properties"]["content_base64"]["maxLength"] == limits_module.base64_encoded_length(
+            APPLICATION_LIMITS.inline_attachment_total_bytes
+        )
+        assert "inline_attachments" not in schema.get("required", [])
+    assert "inline_attachments" not in tools["forward_email"]["properties"]
+
+
+@pytest.mark.asyncio
+async def test_save_draft_maps_inline_attachments_to_the_application_command() -> None:
+    runtime = MagicMock()
+    runtime.mutations.save_draft.execute = AsyncMock(
+        return_value=AppendMutationOutcome("succeeded", "<draft@example.test>", uid="9", mailbox="Drafts")
+    )
+
+    with patch("mcp_email_server.app.get_application_runtime", return_value=runtime):
+        result = await app_module.save_draft(
+            account_name="contabilidad",
+            subject="Factura 26338",
+            body="Adjunta",
+            inline_attachments=[
+                app_module.InlineAttachmentInput(
+                    filename="Factura_26338.pdf", content_base64=_INLINE_PDF_BASE64, mime_type="application/pdf"
+                )
+            ],
+        )
+
+    assert result == "Draft save [succeeded: Drafts; Message-Id: <draft@example.test>]"
+    command = runtime.mutations.save_draft.execute.await_args.args[0]
+    assert command.inline_attachments == (InlineAttachment("Factura_26338.pdf", _INLINE_PDF_BASE64, "application/pdf"),)
+    assert command.attachments == ()
+
+
+@pytest.mark.asyncio
+async def test_send_email_counts_path_and_inline_attachments_in_its_success_line() -> None:
+    outcome = SendMutationOutcome(
+        (TargetMutationOutcome("cliente@example.test", "succeeded"),),
+        SentCopyMutationOutcome("succeeded", "Sent"),
+        message_id="<sent@example.test>",
+    )
+    command_handler = AsyncMock(return_value=outcome)
+    with patch("mcp_email_server.app.send_email_command", command_handler):
+        result = await send_email(
+            account_name="contabilidad",
+            recipients=["cliente@example.test"],
+            subject="Factura",
+            body="Adjunta",
+            attachments=["/srv/condiciones.pdf"],
+            inline_attachments=[
+                app_module.InlineAttachmentInput(filename="Factura_26338.pdf", content_base64=_INLINE_PDF_BASE64)
+            ],
+        )
+
+    assert result == (
+        "Email sent successfully to cliente@example.test with 2 attachment(s). Message-Id: <sent@example.test>"
+    )
+    command = command_handler.await_args.args[0]
+    assert command.attachments == ("/srv/condiciones.pdf",)
+    assert command.inline_attachments == (InlineAttachment("Factura_26338.pdf", _INLINE_PDF_BASE64, None),)
+
+
+@pytest.mark.asyncio
+async def test_raw_json_inline_attachments_are_validated_by_the_tool_schema() -> None:
+    runtime = MagicMock()
+    runtime.mutations.save_draft.execute = AsyncMock(
+        return_value=AppendMutationOutcome("succeeded", "<draft@example.test>", mailbox="Drafts")
+    )
+    arguments = {
+        "account_name": "contabilidad",
+        "subject": "Factura",
+        "body": "Adjunta",
+        "inline_attachments": [
+            {"filename": "Factura_26338.pdf", "content_base64": _INLINE_PDF_BASE64, "mime_type": "application/pdf"}
+        ],
+    }
+
+    with patch("mcp_email_server.app.get_application_runtime", return_value=runtime):
+        await app_module.mcp.call_tool("save_draft", arguments)
+        command = runtime.mutations.save_draft.execute.await_args.args[0]
+        assert command.inline_attachments[0].filename == "Factura_26338.pdf"
+
+        unknown_key = {**arguments, "inline_attachments": [{"filename": "a.pdf", "content": _INLINE_PDF_BASE64}]}
+        with pytest.raises(ToolError, match="content_base64"):
+            await app_module.mcp.call_tool("save_draft", unknown_key)
+    assert runtime.mutations.save_draft.execute.await_count == 1

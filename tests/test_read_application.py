@@ -599,3 +599,75 @@ async def test_read_provider_calls_have_application_deadline(monkeypatch, workfl
 
     with pytest.raises(ReadProviderError, match="timed out"):
         await operation
+
+
+def _named_account(name: str, *, downloads: bool = False, content: bool = False) -> ReadAccountSnapshot:
+    return replace(_account(downloads=downloads, content=content), account_name=name)
+
+
+@pytest.mark.asyncio
+async def test_content_denial_names_the_account_at_the_initial_check() -> None:
+    authority, factory, _provider = _ports(initial=_named_account("info"))
+
+    with pytest.raises(PermissionError, match=r"^Attachment content transfer is disabled for account 'info'\."):
+        await AttachmentContentService(authority, factory).execute(DownloadAttachmentCommand("info", "1", "a.pdf"))
+
+    factory.open.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_content_denial_rechecks_the_authority_returned_by_the_provider_open() -> None:
+    provider = Mock()
+    provider.fetch_attachment = AsyncMock()
+    authority, factory, _ = _ports(
+        initial=_named_account("contabilidad", content=True), fresh=_named_account("contabilidad")
+    )
+    factory.open.return_value = ReadProviderAccess(_named_account("contabilidad"), provider)
+
+    with pytest.raises(PermissionError, match="disabled for account 'contabilidad'"):
+        await AttachmentContentService(authority, factory).execute(
+            DownloadAttachmentCommand("contabilidad", "1", "a.pdf")
+        )
+
+    provider.fetch_attachment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_content_current_recheck_denies_an_override_revoked_during_fetch() -> None:
+    enabled = _named_account("contabilidad", content=True)
+    authority, factory, provider = _ports(initial=enabled, fresh=enabled)
+    authority.resolve.side_effect = [enabled, _named_account("contabilidad", content=False)]
+    provider.fetch_attachment = AsyncMock(return_value=AttachmentPayload("1", "a.pdf", "application/pdf", b"x"))
+
+    with pytest.raises(PermissionError, match=r"^Attachment content transfer is disabled for account 'contabilidad'\."):
+        await AttachmentContentService(authority, factory).execute(
+            DownloadAttachmentCommand("contabilidad", "1", "a.pdf")
+        )
+
+    provider.fetch_attachment.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["initial", "open", "current"])
+async def test_download_denial_names_the_account_at_each_check(stage: str) -> None:
+    enabled = _named_account("info", downloads=True)
+    disabled = _named_account("info", downloads=False)
+    authority, factory, provider = _ports(
+        initial=disabled if stage == "initial" else enabled,
+        fresh=disabled if stage == "open" else enabled,
+    )
+    if stage == "current":
+        authority.resolve.side_effect = [enabled, disabled]
+    provider.fetch_attachment = AsyncMock(return_value=AttachmentPayload("1", "a.pdf", "application/pdf", b"x"))
+    artifacts = Mock()
+    artifacts.preflight = AsyncMock(return_value="/approved/a.pdf")
+    artifacts.write = AsyncMock()
+
+    with pytest.raises(PermissionError, match=r"^Attachment download is disabled for account 'info'\."):
+        await AttachmentDownloadService(authority, factory, artifacts).execute(
+            DownloadAttachmentCommand("info", "1", "a.pdf", "/approved/a.pdf")
+        )
+
+    artifacts.write.assert_not_awaited()
+    if stage == "initial":
+        factory.open.assert_not_called()

@@ -70,12 +70,13 @@ apply. Do not pass them through MCP or chat.
 
 ### Upgrading an existing managed catalog
 
-Managed v3/v4/v5 catalogs migrate to v6 on the first access by the new application.
-Existing mutation grants are preserved, and advanced protocol access stays off;
-no account re-entry is required. Stop all older catalog users, keep a private
-consistent backup, and upgrade UI, CLI, and MCP together before restarting the
-clients. An older runtime cannot read v6, so a package-only downgrade is not a
-rollback. See the [managed upgrade steps](configuration.md#upgrading-a-managed-catalog-to-v6).
+Managed v3/v4/v5/v6 catalogs migrate to v7 on the first access by the new
+application. Existing mutation grants are preserved, advanced protocol access
+stays off, and per-account attachment settings start as inherit; no account
+re-entry is required. Stop all older catalog users, keep a private consistent
+backup, and upgrade UI, CLI, and MCP together before restarting the clients. An
+older runtime cannot read v7, so a package-only downgrade is not a rollback. See
+the [managed upgrade steps](configuration.md#upgrading-a-managed-catalog-to-v7).
 Legacy TOML/environment users are not automatically switched to managed mode.
 
 ## Configure an account with the UI

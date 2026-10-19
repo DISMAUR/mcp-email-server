@@ -19,6 +19,13 @@ disappear when mode, account, policy, or provider capability makes a call
 unavailable. Instead, the application service checks current authority at call
 time and returns a bounded typed denial.
 
+`send_email`, `save_draft`, and `save_to_mailbox` additively expose optional
+`inline_attachments`: at most 20 strict objects with `filename`,
+`content_base64`, and optional `mime_type`, bounded by the centralized filename,
+media-type, and encoded inline-budget limits. Existing `attachments` paths keep
+their schema and meaning; `forward_email` does not gain the field. Spec 07 owns
+validation and composition.
+
 `save_draft` is an independent tool, not a visibility-dependent alias for
 `save_to_mailbox`. Its schema exposes compose fields but no mailbox or flags;
 its destination and mutation authority are owned by specs 04 and 07. The complete
@@ -86,7 +93,7 @@ Bound batches to 20 commands, command text to 64 KiB in total, input message dat
 to 1 MiB in total, received command responses to 512 KiB per connection, and
 IMAP response blocks to 4,096. Canonical protocol results are capped at 3 MiB to
 leave room for both MCP representations and escaping under the 8 MiB final result
-boundary. Reuse the 2 MiB stdio frame and provider timeout boundaries.
+boundary. Reuse the inbound MCP message and provider timeout boundaries.
 Oversized output stops subsequent commands without turning possible remote
 effects into safe-to-retry failures. Annotations conservatively advertise a
 potentially destructive, non-idempotent, open-world mutation.
@@ -208,8 +215,12 @@ In stdio mode:
 - stdout contains MCP protocol frames only;
 - logs and diagnostics use stderr and obey redaction;
 - startup freezes and preflights authority before protocol serving;
-- malformed UTF-8/JSON and frames above the production-owned 2 MiB stdio
-  ceiling produce bounded, redacted handling without echoing input;
+- malformed UTF-8/JSON and frames above the production-owned 32 MiB stdio
+  ceiling produce bounded, redacted handling without echoing input. The
+  ceiling is sized for one compose request carrying the 20 MiB decoded
+  inline-attachment budget as base64 plus JSON framing, body, and headers;
+  SSE and Streamable HTTP request bodies use the same 32 MiB application-owned
+  bound instead of the MCP SDK's smaller default;
 - request cancellation is propagated to application checkpoints;
 - EOF, cancellation, initialization failure, and normal shutdown close all
   constructed resources;
@@ -265,6 +276,12 @@ plane.
   literal blocks agree between JSON text and structured content; isError is
   false only for completed sequences. Help documents syntax and limits, not a
   promise of universal server extension support.
+
+- **10-P2:** The catalog snapshot locks the additive strict `inline_attachments`
+  schema on `send_email`, `save_draft`, and `save_to_mailbox`, its absence from
+  `forward_email`, and unchanged `attachments` paths. Raw JSON arguments validate
+  through the published schema, unknown item keys are rejected, and inbound
+  stdio frames and HTTP request bodies accept messages up to the 32 MiB bound.
 
 1. A complete exact catalog snapshot covers names, descriptions, input/output
    schemas, annotations, resources, visibility, and result shapes.

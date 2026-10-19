@@ -61,6 +61,12 @@ class AttachmentPayload:
 
 @dataclass(frozen=True)
 class ReadAccountSnapshot:
+    """Current read authority for one account.
+
+    The attachment flags are effective values: an explicit account override when
+    configured, otherwise the current global policy.
+    """
+
     account_name: str
     mode: RuntimeMode
     allowed_senders: tuple[str, ...]
@@ -376,6 +382,20 @@ class EmailContentService:
         return prepared
 
 
+def _attachment_download_disabled(account_name: str) -> PermissionError:
+    return PermissionError(
+        f"Attachment download is disabled for account '{account_name}'. A user can set "
+        "enable_attachment_download=true for this account or globally in configuration, CLI, or UI."
+    )
+
+
+def _attachment_content_disabled(account_name: str) -> PermissionError:
+    return PermissionError(
+        f"Attachment content transfer is disabled for account '{account_name}'. A user can set "
+        "enable_attachment_content=true for this account or globally in configuration, CLI, or UI."
+    )
+
+
 class AttachmentDownloadService:
     def __init__(
         self,
@@ -391,25 +411,19 @@ class AttachmentDownloadService:
         command.validate()
         account = self._accounts.resolve(command.account_name)
         if not account.enable_attachment_download:
-            raise PermissionError(
-                "Attachment download is disabled. Set 'enable_attachment_download=true' in settings to enable this feature."
-            )
+            raise _attachment_download_disabled(account.account_name)
         # Resolve and reject unsupported or unsafe local storage before credential
         # resolution, provider construction, download, or MIME decoding.
         resolved_path = await self._artifacts.preflight(command.save_path, command.attachment_name)
         access = self._providers.open(account.account_name, expected_mode=account.mode)
         if not access.account.enable_attachment_download:
-            raise PermissionError(
-                "Attachment download is disabled. Set 'enable_attachment_download=true' in settings to enable this feature."
-            )
+            raise _attachment_download_disabled(access.account.account_name)
         payload = await _bounded_provider_call(access.provider.fetch_attachment(command, access.account))
         if len(payload.content) > APPLICATION_LIMITS.attachment_bytes:
             raise ValueError(f"attachment exceeds {APPLICATION_LIMITS.attachment_bytes} bytes")
         current = self._accounts.resolve(command.account_name, expected_mode=access.account.mode)
         if not current.enable_attachment_download:
-            raise PermissionError(
-                "Attachment download is disabled. Set 'enable_attachment_download=true' in settings to enable this feature."
-            )
+            raise _attachment_download_disabled(current.account_name)
         saved_path = await self._artifacts.write(resolved_path, payload)
         response = AttachmentDownloadResponse(
             email_id=payload.email_id,
@@ -436,20 +450,14 @@ class AttachmentContentService:
         command.validate()
         account = self._accounts.resolve(command.account_name)
         if not account.enable_attachment_content:
-            raise PermissionError(
-                "Attachment content transfer is disabled. Set 'enable_attachment_content=true' in settings to enable this feature."
-            )
+            raise _attachment_content_disabled(account.account_name)
         access = self._providers.open(account.account_name, expected_mode=account.mode)
         if not access.account.enable_attachment_content:
-            raise PermissionError(
-                "Attachment content transfer is disabled. Set 'enable_attachment_content=true' in settings to enable this feature."
-            )
+            raise _attachment_content_disabled(access.account.account_name)
         payload = await _bounded_provider_call(access.provider.fetch_attachment(command, access.account))
         current = self._accounts.resolve(command.account_name, expected_mode=access.account.mode)
         if not current.enable_attachment_content:
-            raise PermissionError(
-                "Attachment content transfer is disabled. Set 'enable_attachment_content=true' in settings to enable this feature."
-            )
+            raise _attachment_content_disabled(current.account_name)
         return payload
 
 

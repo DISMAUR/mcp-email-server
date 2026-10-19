@@ -41,6 +41,7 @@ from mcp_email_server.application.mutations import (
     SetEmailFlagsCommand,
     SetEmailTagsCommand,
     _validate_recipient_policy,
+    prepare_inline_attachments,
 )
 from mcp_email_server.config import EmailSettings, Settings
 from mcp_email_server.emails.classic import ClassicEmailHandler, _validate_flags
@@ -50,6 +51,76 @@ from mcp_email_server.metadata_index import MetadataIndex, MetadataIndexError
 _T = TypeVar("_T")
 
 
+def _sanitize_provider_error_detail(detail: str) -> str:
+    """Strip controls, redact credential-shaped tokens, and bound the detail length."""
+    from mcp_email_server.application.limits import APPLICATION_LIMITS
+
+    cleaned = detail.replace("\r", " ").replace("\n", " ").replace("\0", " ")
+    cleaned = "".join(ch if ord(ch) >= 0x20 and ord(ch) != 0x7F else " " for ch in cleaned)
+    # Redact password/token-looking assignments and long opaque secrets.
+    import re
+
+    cleaned = re.sub(
+        r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization|auth)\b\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)\b(bearer)\s+\S+", r"\1 [redacted]", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    limit = APPLICATION_LIMITS.error_detail_bytes
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > limit:
+        cleaned = encoded[:limit].decode("utf-8", errors="ignore").rstrip()
+    return cleaned
+
+
+def _classify_mutation_provider_error(error: Exception) -> str:
+    """Return a stable provider_failure message with category and sanitized detail."""
+    import ssl
+
+    import aioimaplib
+    from aiosmtplib import (
+        SMTPAuthenticationError,
+        SMTPConnectError,
+        SMTPRecipientRefused,
+        SMTPRecipientsRefused,
+        SMTPResponseException,
+        SMTPServerDisconnected,
+        SMTPTimeoutError,
+    )
+
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError, SMTPTimeoutError, aioimaplib.CommandTimeout)):
+        return "provider_failure: timeout: operation timed out"
+    if isinstance(error, SMTPAuthenticationError):
+        code = getattr(error, "code", None)
+        detail = _sanitize_provider_error_detail(str(getattr(error, "message", error) or error))
+        prefix = f"{code} " if code is not None else ""
+        return f"provider_failure: smtp_auth_failed: {prefix}{detail}".rstrip(": ")
+    if isinstance(error, (SMTPRecipientRefused, SMTPRecipientsRefused, SMTPResponseException)):
+        code = getattr(error, "code", None)
+        raw = getattr(error, "message", None) or getattr(error, "recipients", None) or error
+        detail = _sanitize_provider_error_detail(str(raw))
+        prefix = f"{code} " if code is not None else ""
+        return f"provider_failure: smtp_rejected: {prefix}{detail}".rstrip()
+    if isinstance(error, aioimaplib.Abort):
+        detail = _sanitize_provider_error_detail(str(error) or type(error).__name__)
+        return f"provider_failure: imap_connection_failed: {detail}"
+    if isinstance(error, (SMTPServerDisconnected, SMTPConnectError, ConnectionError, ssl.SSLError)):
+        detail = _sanitize_provider_error_detail(f"{type(error).__name__}: {error}")
+        return f"provider_failure: smtp_connection_failed: {detail}"
+    if isinstance(error, aioimaplib.Error):
+        detail = _sanitize_provider_error_detail(str(error) or type(error).__name__)
+        lowered = detail.lower()
+        if "login" in lowered or "auth" in lowered:
+            return f"provider_failure: imap_auth_failed: {detail}"
+        return f"provider_failure: imap_command_failed: {detail}"
+    if isinstance(error, FileNotFoundError):
+        detail = _sanitize_provider_error_detail(str(error) or type(error).__name__)
+        return f"provider_failure: attachment_not_found: {detail}"
+    # Unknown: expose the exception type only — never the raw message (may hold secrets).
+    return f"provider_failure: unknown: {type(error).__name__}"
+
+
 async def _bounded_mutation_call(awaitable: Awaitable[_T]) -> _T:
     try:
         return await awaitable
@@ -57,8 +128,8 @@ async def _bounded_mutation_call(awaitable: Awaitable[_T]) -> _T:
         raise
     except (ValueError, PermissionError):
         raise
-    except Exception:
-        raise MutationProviderError("provider_failure: mutation provider request failed") from None
+    except Exception as error:
+        raise MutationProviderError(_classify_mutation_provider_error(error)) from None
 
 
 def _forward_part_wire_size(part: Message) -> int:
@@ -157,6 +228,7 @@ class ClassicMutationProvider:
         account: MutationAccountSnapshot,
     ) -> AppendMutationOutcome:
         self._guard(account, "draft" if isinstance(command, DraftAppendCommand) else "append", command)
+        inline_attachments = prepare_inline_attachments(command.inline_attachments)
         message = self._handler.incoming_client.compose_message(
             list(command.recipients),
             command.subject,
@@ -168,6 +240,7 @@ class ClassicMutationProvider:
             command.in_reply_to,
             command.references,
             include_bcc_header=True,
+            inline_attachments=list(inline_attachments) or None,
         )
         flags = r"(\Draft \Seen)" if command.flags is None else _validate_flags(list(command.flags))
         return await _bounded_mutation_call(
@@ -261,6 +334,7 @@ class ClassicMutationProvider:
         client = self._handler.outgoing_client
         if client is None:
             raise MutationProviderError("capability_unavailable: SMTP is not configured for this account")
+        inline_attachments = prepare_inline_attachments(command.inline_attachments)
         return await _bounded_mutation_call(
             client.send_email_with_outcome(
                 list(command.recipients),
@@ -274,6 +348,7 @@ class ClassicMutationProvider:
                 command.references,
                 reply_to,
                 extra_parts=extra_parts,
+                inline_attachments=list(inline_attachments) or None,
             )
         )
 

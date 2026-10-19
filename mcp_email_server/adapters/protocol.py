@@ -49,7 +49,7 @@ def require_protocol_access(resolved: LocalAccountResolution, protocol: Protocol
         if (
             not {"organize", "delete", "append"}.issubset(grants)
             or settings.allowed_senders
-            or not settings.enable_attachment_content
+            or not account.attachment_content_enabled(settings.enable_attachment_content)
         ):
             raise ProtocolFailure(
                 "policy_conflict: IMAP requires organize/delete/append, no sender filter and attachment content enabled; use focused tools or ask the user to configure access"

@@ -137,17 +137,19 @@ backups include plaintext `managed_secret.secret_value` values. Keep every copy
 under protection equivalent to the private original; do not upload, share, or
 treat it as a non-secret account database.
 
-The declared v3/v4/v5-to-v6 catalog migration runs only after the existing catalog
-and sidecars pass the same private-file checks as a normal managed open. One
-bounded SQLite write transaction validates the exact source schema and adds
-default-disabled protocol access. Sources before v5 also receive fixed-five global
+The declared v3/v4/v5/v6-to-v7 catalog migration runs only after the existing
+catalog and sidecars pass the same private-file checks as a normal managed open.
+One bounded SQLite write transaction validates the exact source schema and adds
+per-account attachment overrides that inherit the catalog policy, so no account
+gains attachment access by upgrading. Sources before v6 also receive
+default-disabled protocol access; sources before v5 also receive fixed-five global
 grants, inheriting account overrides, and an unset draft mailbox; v3 additionally
 receives default-disabled attachment content and empty tag mappings. It validates
-the resulting v6 schema and invariants and records version 6 last. It neither
+the resulting v7 schema and invariants and records version 7 last. It neither
 resolves nor copies secret values; failure rolls back without changing the
-advertised source version. Older runtimes reject v6. Stop all catalog users and
+advertised source version. Older runtimes reject v7. Stop all catalog users and
 retain a private, consistent backup before the first new-version open; see
-[managed catalog upgrades](configuration.md#upgrading-a-managed-catalog-to-v6).
+[managed catalog upgrades](configuration.md#upgrading-a-managed-catalog-to-v7).
 
 A create or rotation stores a new immutable value and commits it as active only
 if the reviewed account revision still matches. On Linux and Windows, inserting
@@ -752,6 +754,17 @@ stat, or resolve caller-supplied attachment paths, including UNC or network
 paths. Once those checks pass, attachment size or file-access validation may
 still reject the request after filesystem access.
 
+`inline_attachments` on `send_email`, `save_draft`, and `save_to_mailbox` carry
+file bytes inside the MCP request as strict base64 instead of naming a server
+path, so they never read the server filesystem. Their filename, media type,
+base64 syntax, count, and decoded size are validated before account resolution
+or any provider connection, and the decoded bytes stay in memory for MIME
+composition only: they are not written to disk and neither they nor the base64
+text are logged. Inline attachments add to, and never replace, the mutation
+grant, send-capability, and recipient-allowlist checks. Filenames reject path
+separators, `..`, control characters, and Unicode format characters such as
+bidirectional overrides that could disguise a file extension.
+
 ## TLS certificate verification
 
 Keep `verify_ssl = true` for remote IMAP and SMTP services. Disabling
@@ -775,6 +788,23 @@ verify_ssl = false
 
 Limit this exception to the specific local connection. See
 [ProtonMail Bridge and self-signed TLS](guides.md#protonmail-bridge-and-self-signed-tls).
+
+## Inbound MCP message size
+
+Every transport bounds one inbound MCP message at 32 MiB: stdio frames are
+rejected above that size before JSON parsing, and SSE and Streamable HTTP request
+bodies above it receive HTTP 413 before session handling. The ceiling was raised
+from 2 MiB (stdio) and the MCP SDK's 4 MiB HTTP default so that one
+`send_email`, `save_draft`, or `save_to_mailbox` request can carry the 20 MiB
+decoded `inline_attachments` budget as base64 (about 26.7 MiB) plus its JSON
+framing, body, and headers. It is still a fixed, bounded value: a single
+request can make the server buffer at most this much input, plus the bounded
+decoded copy and MIME serialization of the attachments while composing. Other
+limits are unchanged; in particular, the 8 MiB serialized-result ceiling still
+bounds every response, including `get_attachment_content`.
+
+Inline attachment content is decoded in memory only. It is never written to a
+local file, and neither the base64 text nor the decoded bytes are logged.
 
 ## HTTP transport security
 

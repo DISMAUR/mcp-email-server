@@ -451,15 +451,21 @@ class LocalReadBackend:
             if roles
             else resolve_local_account(account_name, expected_mode=expected_mode)
         )
+        account = resolved.account
         return (
-            resolved.account,
+            account,
             ReadAccountSnapshot(
-                account_name=resolved.account.account_name,
+                account_name=account.account_name,
                 mode=resolved.mode,
                 allowed_senders=tuple(resolved.settings.allowed_senders),
-                enable_attachment_download=resolved.settings.enable_attachment_download,
-                enable_attachment_content=resolved.settings.enable_attachment_content,
-                tag_registry=ImapKeywordRegistry.from_tags(resolved.account.tags),
+                # An explicit account override wins; otherwise the current global policy applies.
+                enable_attachment_download=account.attachment_download_enabled(
+                    resolved.settings.enable_attachment_download
+                ),
+                enable_attachment_content=account.attachment_content_enabled(
+                    resolved.settings.enable_attachment_content
+                ),
+                tag_registry=ImapKeywordRegistry.from_tags(account.tags),
             ),
         )
 

@@ -85,6 +85,12 @@ def _parse_bool_env(value: str | None, default: bool = False) -> bool:
     return value.lower() in ("true", "1", "yes", "on")
 
 
+def parse_optional_bool_env(name: str) -> bool | None:
+    """Read a tri-state account override: unset inherits, any value forces a boolean."""
+    value = os.getenv(name)
+    return None if value is None else _parse_bool_env(value)
+
+
 def normalize_address(raw: str) -> str:
     """Extract and normalize a bare email address for case-insensitive comparison.
 
@@ -321,6 +327,10 @@ class EmailSettings(AccountAttributes):
     allowed_mutations: list[MutationClass] | None = None
     drafts_mailbox: str | None = None
     allow_protocol_commands: bool = False
+    # Account overrides of the global attachment policies: None inherits the
+    # global value, True/False force it for this account only.
+    enable_attachment_download: bool | None = None
+    enable_attachment_content: bool | None = None
 
     @model_validator(mode="after")
     def validate_tags(self) -> EmailSettings:
@@ -337,6 +347,14 @@ class EmailSettings(AccountAttributes):
     def can_send(self) -> bool:
         """Return whether this account has SMTP configuration."""
         return self.outgoing is not None
+
+    def attachment_download_enabled(self, global_default: bool) -> bool:
+        """Return effective download policy: an explicit account value overrides the global one."""
+        return global_default if self.enable_attachment_download is None else self.enable_attachment_download
+
+    def attachment_content_enabled(self, global_default: bool) -> bool:
+        """Return effective content-transfer policy: an explicit account value overrides the global one."""
+        return global_default if self.enable_attachment_content is None else self.enable_attachment_content
 
     @classmethod
     def init(
@@ -366,6 +384,8 @@ class EmailSettings(AccountAttributes):
         allowed_mutations: list[MutationClass] | None = None,
         drafts_mailbox: str | None = None,
         allow_protocol_commands: bool = False,
+        enable_attachment_download: bool | None = None,
+        enable_attachment_content: bool | None = None,
     ) -> EmailSettings:
         for candidate in (password, imap_password, smtp_password):
             if candidate == keyring_store.SENTINEL:
@@ -406,6 +426,8 @@ class EmailSettings(AccountAttributes):
             allowed_mutations=allowed_mutations,
             drafts_mailbox=drafts_mailbox,
             allow_protocol_commands=allow_protocol_commands,
+            enable_attachment_download=enable_attachment_download,
+            enable_attachment_content=enable_attachment_content,
         )
 
     @classmethod
@@ -431,6 +453,8 @@ class EmailSettings(AccountAttributes):
         - MCP_EMAIL_SERVER_SAVE_TO_SENT (default: true)
         - MCP_EMAIL_SERVER_SENT_FOLDER_NAME (default: auto-detect)
         - MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS (default: false)
+        - MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_DOWNLOAD (unset: inherit global)
+        - MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_CONTENT (unset: inherit global)
         """
         # Check if minimum required environment variables are set
         email_address = os.getenv("MCP_EMAIL_SERVER_EMAIL_ADDRESS")
@@ -476,6 +500,10 @@ class EmailSettings(AccountAttributes):
                 sent_folder_name=os.getenv("MCP_EMAIL_SERVER_SENT_FOLDER_NAME"),
                 drafts_mailbox=os.getenv("MCP_EMAIL_SERVER_DRAFTS_MAILBOX"),
                 allow_protocol_commands=_parse_bool_env(os.getenv("MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS"), False),
+                enable_attachment_download=parse_optional_bool_env(
+                    "MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_DOWNLOAD"
+                ),
+                enable_attachment_content=parse_optional_bool_env("MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_CONTENT"),
                 allowed_mutations=(
                     list(
                         parse_mutations([

@@ -9,10 +9,15 @@ from typing import Annotated, Any, Literal
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, TextContent, ToolAnnotations
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mcp_email_server.application.accounts import AvailableAccount, EffectiveConfiguration
-from mcp_email_server.application.limits import APPLICATION_LIMITS, validate_serialized_result
+from mcp_email_server.application.limits import (
+    APPLICATION_LIMITS,
+    base64_encoded_length,
+    largest_base64_payload_bytes,
+    validate_serialized_result,
+)
 from mcp_email_server.application.metadata import ListEmailMetadataQuery
 from mcp_email_server.application.mutations import (
     MUTABLE_EMAIL_FLAGS,
@@ -25,6 +30,7 @@ from mcp_email_server.application.mutations import (
     DeleteCommand,
     FlagOperation,
     ForwardCommand,
+    InlineAttachment,
     MarkReadCommand,
     MoveCommand,
     MoveMutationOutcome,
@@ -66,6 +72,55 @@ MAX_IMAP_UID_CHARACTERS = len(str(APPLICATION_LIMITS.maximum_imap_uid))
 UidInput = Annotated[str, Field(max_length=MAX_IMAP_UID_CHARACTERS, pattern=r"^[1-9][0-9]*$")]
 AddressInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.address_bytes)]
 AttachmentPathInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.attachment_path_bytes)]
+MAX_INLINE_ATTACHMENT_BASE64_CHARACTERS = base64_encoded_length(
+    min(APPLICATION_LIMITS.attachment_bytes, APPLICATION_LIMITS.inline_attachment_total_bytes)
+)
+
+
+class InlineAttachmentInput(BaseModel):
+    """One attachment sent inside the request, for clients without access to the server's filesystem."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(
+        min_length=1,
+        max_length=APPLICATION_LIMITS.attachment_filename_bytes,
+        description="Bare file name shown to recipients, for example 'Factura_26338.pdf'. "
+        "No path separators, '..', or control characters.",
+    )
+    content_base64: str = Field(
+        min_length=1,
+        max_length=MAX_INLINE_ATTACHMENT_BASE64_CHARACTERS,
+        description="The file bytes as standard RFC 4648 base64 with '=' padding, without whitespace, "
+        "line breaks, or a data: URL prefix.",
+    )
+    mime_type: str | None = Field(
+        default=None,
+        max_length=APPLICATION_LIMITS.attachment_mime_type_bytes,
+        description="Optional media type such as 'application/pdf' (type/subtype, no parameters). "
+        "When omitted it is inferred from the file extension, else application/octet-stream.",
+    )
+
+    def command_value(self) -> InlineAttachment:
+        return InlineAttachment(filename=self.filename, content_base64=self.content_base64, mime_type=self.mime_type)
+
+
+InlineAttachmentsInput = Annotated[
+    list[InlineAttachmentInput] | None,
+    Field(
+        default=None,
+        max_length=APPLICATION_LIMITS.attachments,
+        description="Attachments carried inside the request as base64, for files the client holds but the server "
+        "cannot read. May be combined with attachments: at most 20 attachments in total and at most 20 MiB of "
+        "decoded inline content per message.",
+    ),
+]
+
+
+def _inline_attachments(values: list[InlineAttachmentInput] | None) -> tuple[InlineAttachment, ...]:
+    return tuple(value.command_value() for value in values or ())
+
+
 FlagInput = Annotated[str, Field(max_length=APPLICATION_LIMITS.flag_bytes)]
 AccountDiscoveryResult = Annotated[
     list[AvailableAccount],
@@ -635,7 +690,8 @@ async def list_allowed_senders() -> PolicyDiscoveryResult:
 
 @mcp.tool(
     description=(
-        "Send one email using the specified account. Supports reply threading. Partial or ambiguous SMTP "
+        "Send one email using the specified account. Supports reply threading. Attach server-side files with "
+        "attachments or send file bytes as base64 with inline_attachments. Partial or ambiguous SMTP "
         "delivery reports per-recipient succeeded/failed/unknown status and reports the independent Sent-copy "
         "outcome separately; ambiguous effects are not retried automatically. The response names the delivered "
         "message's RFC Message-Id once the provider accepts the message data, and reports no identifier for an "
@@ -685,6 +741,7 @@ async def send_email(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    inline_attachments: InlineAttachmentsInput = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -721,6 +778,7 @@ async def send_email(
                 bcc=tuple(bcc or ()),
                 html=html,
                 attachments=tuple(attachments or ()),
+                inline_attachments=_inline_attachments(inline_attachments),
                 in_reply_to=in_reply_to,
                 references=references,
                 reply_to=reply_to,
@@ -733,7 +791,8 @@ async def send_email(
         ) from exc
     if _send_outcome_is_clean(outcome):
         recipient_str = ", ".join(recipients)
-        attachment_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+        attachment_count = len(attachments or ()) + len(inline_attachments or ())
+        attachment_info = f" with {attachment_count} attachment(s)" if attachment_count else ""
         return f"Email sent successfully to {recipient_str}{attachment_info}{_reported_message_id(outcome)}"
     return f"Email delivery [{_tagged_send_result(outcome)}]"
 
@@ -878,6 +937,7 @@ async def save_to_mailbox(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    inline_attachments: InlineAttachmentsInput = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -915,6 +975,7 @@ async def save_to_mailbox(
                 bcc=tuple(bcc or ()),
                 html=html,
                 attachments=tuple(attachments or ()),
+                inline_attachments=_inline_attachments(inline_attachments),
                 in_reply_to=in_reply_to,
                 references=references,
                 flags=tuple(flags) if flags is not None else None,
@@ -934,7 +995,7 @@ async def save_to_mailbox(
 
 
 @mcp.tool(
-    description="Compose and save an unsent draft to the configured drafts mailbox or unique special-use Drafts mailbox. Requires draft permission, not append or send. Recipients may be omitted; supplied recipients obey the recipient allowlist. The Draft flag is fixed; no arbitrary target or flags.",
+    description="Compose and save an unsent draft to the configured drafts mailbox or unique special-use Drafts mailbox. Requires draft permission, not append or send. Recipients may be omitted; supplied recipients obey the recipient allowlist. Attach server-side files with attachments or file bytes as base64 with inline_attachments. The Draft flag is fixed; no arbitrary target or flags.",
     annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True),
 )
 async def save_draft(
@@ -977,6 +1038,7 @@ async def save_draft(
             description="A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
         ),
     ] = None,
+    inline_attachments: InlineAttachmentsInput = None,
     in_reply_to: Annotated[
         str | None,
         Field(
@@ -1004,6 +1066,7 @@ async def save_draft(
             bcc=tuple(bcc or ()),
             html=html,
             attachments=tuple(attachments or ()),
+            inline_attachments=_inline_attachments(inline_attachments),
             in_reply_to=in_reply_to,
             references=references,
         )
@@ -1340,7 +1403,8 @@ async def create_mailbox(
 @mcp.tool(
     description=(
         "Read one email attachment as an MCP embedded binary resource without writing a local file. "
-        "This independent transfer mode requires enable_attachment_content=true."
+        "This independent transfer mode requires enable_attachment_content=true for the account; an account "
+        "setting overrides the global one. Attachments up to about 6 MiB fit the MCP result limit."
     ),
     annotations=_READ_ONLY_REMOTE,
 )
@@ -1377,10 +1441,11 @@ async def get_attachment_content(
         )
     )
     uri = f"email-attachment://content/{secrets.token_urlsafe(18)}"
+    blob = base64.b64encode(payload.content).decode("ascii")
     resource = BlobResourceContents.model_validate({
         "uri": uri,
         "mimeType": payload.mime_type,
-        "blob": base64.b64encode(payload.content).decode("ascii"),
+        "blob": blob,
     })
     embedded = EmbeddedResource.model_validate({
         "type": "resource",
@@ -1391,15 +1456,22 @@ async def get_attachment_content(
         },
     })
     result = CallToolResult(content=[embedded])
+    serialized = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
     try:
-        validate_serialized_result(result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
-    except ValueError:
-        raise ValueError("serialized attachment content exceeds the global result limit") from None
+        validate_serialized_result(serialized)
+    except ValueError as exc:
+        largest = largest_base64_payload_bytes(len(serialized) - len(blob))
+        raise ValueError(
+            f"limit_exceeded: the {len(payload.content)}-byte attachment would produce a {len(serialized)}-byte "
+            f"MCP result ({exc}, the global result limit). Attachments up to about "
+            f"{largest / (1_024 * 1_024):.1f} MiB ({largest} bytes) fit; use download_attachment where it is "
+            "enabled, or ask for a smaller file."
+        ) from None
     return result
 
 
 @mcp.tool(
-    description="Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled in settings (enable_attachment_download=true) due to security considerations.",
+    description="Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled (enable_attachment_download=true for the account or globally; an account setting overrides the global one) due to security considerations.",
     annotations=_FILESYSTEM_WRITE,
 )
 async def download_attachment(

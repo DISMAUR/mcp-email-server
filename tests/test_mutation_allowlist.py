@@ -1,11 +1,28 @@
-"""Sender-allowlist enforcement on the UID mutation tools."""
+"""Sender-allowlist enforcement on the UID mutation tools and recipient policy for inline attachments."""
 
 import asyncio
+import base64
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mcp_email_server.application.mutation_policy import MutationClass
+from mcp_email_server.application.mutations import (
+    AppendMutationOutcome,
+    DeliveryMutationOutcome,
+    InlineAttachment,
+    MutationAccountSnapshot,
+    MutationProviderAccess,
+    MutationProviderError,
+    MutationServices,
+    RecipientPolicyDeniedError,
+    SaveDraftCommand,
+    SaveToMailboxCommand,
+    SendCommand,
+    TargetMutationOutcome,
+)
 from mcp_email_server.emails.classic import EmailClient
 
 
@@ -391,3 +408,157 @@ class TestMoveEmailsAllowlist:
         assert _uid_op_targets(mock_imap, "store") == ["1"]  # only allowed UID \Deleted-flagged
         assert _uid_op_targets(mock_imap, "expunge") == ["1"]
         mock_imap.expunge.assert_not_called()
+
+
+# --- Recipient allowlist and mutation grants with inline attachments -------------
+
+_INLINE_PDF = InlineAttachment(
+    filename="Factura_26338.pdf",
+    content_base64=base64.b64encode(b"%PDF-1.4\n%%EOF\n").decode("ascii"),
+    mime_type="application/pdf",
+)
+
+
+def _inline_account(**changes: object) -> MutationAccountSnapshot:
+    account = MutationAccountSnapshot(
+        account_name="contabilidad",
+        mode="managed",
+        allowed_senders=(),
+        allowed_recipients=("*@cliente.example",),
+        report_blocked_mutations=False,
+        can_send=True,
+        drafts_mailbox="Drafts",
+    )
+    return replace(account, **changes)
+
+
+def _inline_services(account: MutationAccountSnapshot) -> tuple[MutationServices, MagicMock, MagicMock]:
+    provider = MagicMock()
+    provider.send = AsyncMock(
+        return_value=DeliveryMutationOutcome((TargetMutationOutcome("ana@cliente.example", "succeeded"),), None)
+    )
+    provider.save_to_mailbox = AsyncMock(
+        return_value=AppendMutationOutcome("succeeded", "<draft@cliente.example>", mailbox="Drafts")
+    )
+    authority = MagicMock()
+    authority.resolve.return_value = account
+    factory = MagicMock()
+    factory.open.return_value = MutationProviderAccess(account, provider)
+    projection = MagicMock()
+    projection.invalidate = AsyncMock()
+    projections = MagicMock()
+    projections.open = AsyncMock(return_value=projection)
+    return MutationServices.compose(authority, factory, projections), factory, provider
+
+
+def _inline_command(workflow: str, recipients: tuple[str, ...]):
+    fields = {
+        "account_name": "contabilidad",
+        "recipients": recipients,
+        "subject": "Factura 26338",
+        "body": "Adjunta la factura.",
+        "inline_attachments": (_INLINE_PDF,),
+    }
+    if workflow == "send":
+        return SendCommand(**fields)
+    if workflow == "draft":
+        return SaveDraftCommand(**fields)
+    return SaveToMailboxCommand(**fields)
+
+
+def _run(services: MutationServices, command):
+    if isinstance(command, SendCommand):
+        return services.send.execute(command)
+    if isinstance(command, SaveDraftCommand):
+        return services.save_draft.execute(command)
+    return services.save_to_mailbox.execute(command)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+@pytest.mark.parametrize("field", ["recipients", "cc", "bcc"])
+async def test_inline_attachments_do_not_bypass_the_recipient_allowlist(workflow: str, field: str) -> None:
+    services, factory, provider = _inline_services(_inline_account())
+    command = replace(_inline_command(workflow, ("ana@cliente.example",)), **{field: ("intruso@evil.example",)})
+    if field == "recipients":
+        command = replace(command, recipients=("intruso@evil.example",))
+
+    with pytest.raises(RecipientPolicyDeniedError):
+        await _run(services, command)
+
+    factory.open.assert_not_called()
+    provider.send.assert_not_called()
+    provider.save_to_mailbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+async def test_inline_attachments_respect_an_empty_recipient_allowlist(workflow: str) -> None:
+    services, factory, provider = _inline_services(_inline_account(allowed_recipients=()))
+
+    with pytest.raises(RecipientPolicyDeniedError):
+        await _run(services, _inline_command(workflow, ("ana@cliente.example",)))
+
+    factory.open.assert_not_called()
+    provider.send.assert_not_called()
+    provider.save_to_mailbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workflow", "grants", "missing"),
+    [
+        ("send", ("draft", "organize", "delete", "append"), "send"),
+        ("draft", ("organize", "delete", "send", "append"), "draft"),
+        ("save", ("draft", "organize", "delete", "send"), "append"),
+        ("send", (), "send"),
+    ],
+)
+async def test_inline_attachments_respect_mutation_grants(
+    workflow: str, grants: tuple[MutationClass, ...], missing: str
+) -> None:
+    services, factory, provider = _inline_services(_inline_account(allowed_mutations=grants))
+
+    with pytest.raises(PermissionError, match=f"Mutation class '{missing}' is not allowed"):
+        await _run(services, _inline_command(workflow, ("ana@cliente.example",)))
+
+    factory.open.assert_not_called()
+    provider.send.assert_not_called()
+    provider.save_to_mailbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_inline_send_is_refused_for_an_account_without_send_capability() -> None:
+    services, factory, provider = _inline_services(_inline_account(can_send=False))
+
+    with pytest.raises(MutationProviderError, match="capability_unavailable"):
+        await _run(services, _inline_command("send", ("ana@cliente.example",)))
+
+    factory.open.assert_not_called()
+    provider.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_inline_send_revalidates_a_tightened_allowlist_at_the_provider_boundary() -> None:
+    services, factory, provider = _inline_services(_inline_account())
+    factory.open.return_value = MutationProviderAccess(
+        _inline_account(allowed_recipients=("otro@cliente.example",)), provider
+    )
+
+    with pytest.raises(RecipientPolicyDeniedError):
+        await _run(services, _inline_command("send", ("ana@cliente.example",)))
+
+    provider.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+async def test_allowed_inline_attachment_reaches_the_provider_unchanged(workflow: str) -> None:
+    services, factory, provider = _inline_services(_inline_account())
+
+    await _run(services, _inline_command(workflow, ("ana@cliente.example",)))
+
+    effect = provider.send if workflow == "send" else provider.save_to_mailbox
+    command = effect.await_args.args[0]
+    assert command.inline_attachments == (_INLINE_PDF,)
+    assert factory.open.called

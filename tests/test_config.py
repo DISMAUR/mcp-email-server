@@ -1030,3 +1030,59 @@ def test_report_blocked_mutations_env_overrides_toml(tmp_path, monkeypatch):
         assert config_module.get_settings(reload=True).report_blocked_mutations is True
     finally:
         config_module._settings = None
+
+
+@pytest.mark.parametrize(
+    ("override", "global_default", "expected"),
+    [(None, False, False), (None, True, True), (True, False, True), (False, True, False), (True, True, True)],
+)
+def test_account_attachment_overrides_take_precedence_only_when_explicit(
+    email_settings: EmailSettings, override: bool | None, global_default: bool, expected: bool
+) -> None:
+    account = email_settings.model_copy(
+        update={"enable_attachment_content": override, "enable_attachment_download": override}
+    )
+
+    assert account.attachment_content_enabled(global_default) is expected
+    assert account.attachment_download_enabled(global_default) is expected
+
+
+def test_account_attachment_overrides_round_trip_through_legacy_toml(tmp_path: Path, monkeypatch) -> None:
+    parent = tmp_path / "private"
+    config_path = parent / "config.toml"
+    _prepare_private_test_file(config_path)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+    monkeypatch.setitem(Settings.model_config, "toml_file", config_path)
+    config_path.write_text(
+        'credential_storage = "plaintext"\nenable_attachment_content = false\n'
+        '[[emails]]\naccount_name = "info"\nfull_name = "Info"\nemail_address = "info@example.test"\n'
+        '[emails.incoming]\nuser_name = "info@example.test"\npassword = "secret"\nhost = "imap.example.test"\n'
+        "port = 993\n"
+        '[[emails]]\naccount_name = "contabilidad"\nfull_name = "Contabilidad"\n'
+        'email_address = "contabilidad@example.test"\nenable_attachment_content = true\n'
+        "enable_attachment_download = false\n"
+        '[emails.incoming]\nuser_name = "contabilidad@example.test"\npassword = "secret"\n'
+        'host = "imap.example.test"\nport = 993\n'
+    )
+    _harden_private_test_file(config_path)
+    monkeypatch.delenv("MCP_EMAIL_SERVER_ENABLE_ATTACHMENT_CONTENT", raising=False)
+
+    settings = Settings()
+    info, contabilidad = settings.emails
+    assert (info.enable_attachment_content, info.enable_attachment_download) == (None, None)
+    assert (contabilidad.enable_attachment_content, contabilidad.enable_attachment_download) == (True, False)
+    assert settings.enable_attachment_content is False
+
+    settings.store()
+    stored = tomllib.loads(config_path.read_text())
+    assert "enable_attachment_content" not in stored["emails"][0]
+    assert "enable_attachment_download" not in stored["emails"][0]
+    assert stored["emails"][1]["enable_attachment_content"] is True
+    assert stored["emails"][1]["enable_attachment_download"] is False
+    reloaded = Settings()
+    assert [account.enable_attachment_content for account in reloaded.emails] == [None, True]
+
+
+def test_account_attachment_overrides_reject_non_boolean_values(email_settings: EmailSettings) -> None:
+    with pytest.raises(ValidationError):
+        EmailSettings.model_validate({**email_settings.model_dump(), "enable_attachment_content": "sometimes"})
