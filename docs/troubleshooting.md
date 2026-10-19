@@ -196,7 +196,7 @@ or MCP process migrates it. Upgrade all catalog users together and restart every
 MCP client. If rolling back the package, restore the consistent pre-migration
 catalog backup too; do not edit the schema version manually, delete the catalog,
 or re-enter all accounts as a routine upgrade fix. Follow the
-[managed upgrade and rollback steps](configuration.md#upgrading-a-managed-catalog-to-v6).
+[managed upgrade and rollback steps](configuration.md#upgrading-a-managed-catalog-to-v7).
 
 Other older development schemas are still rejected. For those versions, select
 legacy mode, preserve the old file for rollback, and initialize a fresh
@@ -730,3 +730,18 @@ Include:
 - Minimal steps to reproduce the problem.
 
 Report issues at <https://github.com/Wh1isper/mcp-email-server/issues>.
+
+## Mutation provider failures
+
+Mutation tools (`send_email`, `save_draft`, `save_to_mailbox`, flag/tag/move
+operations) report provider problems as:
+
+`provider_failure: <category>: <detail>`
+
+Categories include `smtp_auth_failed`, `smtp_rejected` (SMTP code and text),
+`smtp_connection_failed`, `imap_auth_failed`, `imap_command_failed`,
+`imap_connection_failed`, `timeout`, `attachment_not_found`, and `unknown`
+(exception type only — raw messages are omitted so secrets cannot leak).
+Attachment validation failures still use the dedicated
+`invalid_attachment` / `attachment_too_large` / `attachment_not_found`
+prefixes and are not wrapped in `provider_failure`.

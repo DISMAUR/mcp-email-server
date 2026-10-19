@@ -62,7 +62,7 @@ async def test_mutation_adapter_sanitizes_unexpected_provider_failure() -> None:
 
     with pytest.raises(
         MutationProviderError,
-        match=r"^provider_failure: mutation provider request failed$",
+        match=r"^provider_failure: unknown: RuntimeError$",
     ) as caught:
         await provider.set_flags(SetEmailFlagsCommand("primary", ("1",), "add", (r"\Seen",)), _account())
 
@@ -342,7 +342,7 @@ async def test_mutation_adapter_sanitizes_unexpected_forward_source_failure() ->
 
     with pytest.raises(
         MutationProviderError,
-        match=r"^provider_failure: mutation provider request failed$",
+        match=r"^provider_failure: unknown: RuntimeError$",
     ) as caught:
         await ClassicMutationProvider(handler).fetch_forward_source(_forward_command(), _account())
 
@@ -360,7 +360,7 @@ async def test_mutation_adapter_sanitizes_unserializable_forward_part() -> None:
     handler = MagicMock()
     handler.incoming_client.fetch_forward_source = AsyncMock(return_value=_forward_source_payload([broken]))
 
-    with pytest.raises(MutationProviderError, match=r"^provider_failure: mutation provider request failed$"):
+    with pytest.raises(MutationProviderError, match=r"^provider_failure: unknown: RuntimeError$"):
         await ClassicMutationProvider(handler).fetch_forward_source(_forward_command(), _account())
 
 
@@ -430,10 +430,54 @@ async def test_mutation_adapter_sanitizes_unexpected_forward_delivery_failure() 
 
     with pytest.raises(
         MutationProviderError,
-        match=r"^provider_failure: mutation provider request failed$",
+        match=r"^provider_failure: unknown: RuntimeError$",
     ) as caught:
         await ClassicMutationProvider(handler).forward(
             _forward_command(), ForwardSource("s", "author@example.test", "block", ()), _account()
         )
 
     assert provider_detail not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_mutation_adapter_classifies_smtp_rejection() -> None:
+    from aiosmtplib import SMTPResponseException
+
+    error = SMTPResponseException(550, "5.1.1 mailbox unavailable")
+    provider = _set_flags_provider(error)
+
+    with pytest.raises(MutationProviderError, match=r"^provider_failure: smtp_rejected: 550 ") as caught:
+        await provider.set_flags(SetEmailFlagsCommand("primary", ("1",), "add", (r"\Seen",)), _account())
+
+    assert "mailbox unavailable" in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_mutation_adapter_classifies_smtp_auth_failure() -> None:
+    from aiosmtplib import SMTPAuthenticationError
+
+    error = SMTPAuthenticationError(535, "5.7.8 Authentication failed")
+    provider = _set_flags_provider(error)
+
+    with pytest.raises(MutationProviderError, match=r"^provider_failure: smtp_auth_failed: 535 ") as caught:
+        await provider.set_flags(SetEmailFlagsCommand("primary", ("1",), "add", (r"\Seen",)), _account())
+
+    assert "Authentication failed" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_mutation_adapter_redacts_password_in_classified_detail() -> None:
+    from aiosmtplib import SMTPAuthenticationError
+
+    error = SMTPAuthenticationError(535, "auth failed password=super-secret-value token=abcd")
+    provider = _set_flags_provider(error)
+
+    with pytest.raises(MutationProviderError) as caught:
+        await provider.set_flags(SetEmailFlagsCommand("primary", ("1",), "add", (r"\Seen",)), _account())
+
+    message = str(caught.value)
+    assert message.startswith("provider_failure: smtp_auth_failed:")
+    assert "super-secret-value" not in message
+    assert "password=[redacted]" in message
+    assert "abcd" not in message
