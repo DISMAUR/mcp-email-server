@@ -1246,3 +1246,88 @@ def test_protocol_opt_in_cli_round_trip_and_omitted_update(monkeypatch, tmp_path
     )
     assert disabled.exit_code == 0, disabled.output
     assert not catalog.show_account("alice").allow_protocol_commands
+
+
+def test_account_attachment_overrides_cli_round_trip_inherit_and_omitted_update(monkeypatch, tmp_path, fake_keyring):
+    parent = _private_directory(tmp_path / "attachment-cli")
+    database = parent / "catalog.sqlite3"
+    monkeypatch.setenv("MCP_EMAIL_SERVER_CONFIG_PATH", str(parent / "config.toml"))
+    runner = CliRunner()
+    assert runner.invoke(app, ["config", "init", "--database", str(database)]).exit_code == 0
+    added = runner.invoke(app, [*_base_account_args(), "--attachment-content", "true"], input="synthetic-secret\n")
+    assert added.exit_code == 0, added.output
+    catalog = ManagedCatalog(database)
+    details = catalog.show_account("alice")
+    assert (details.enable_attachment_content, details.enable_attachment_download) == (True, None)
+
+    shown = runner.invoke(app, ["account", "show", "alice"])
+    assert shown.exit_code == 0, shown.output
+    assert "enable_attachment_content=true" in shown.output
+    assert "enable_attachment_download=inherit" in shown.output
+    shown_json = _json_document(runner.invoke(app, ["account", "show", "alice", "--json"]))
+    assert shown_json["data"]["enable_attachment_content"] is True  # type: ignore[index]
+    assert shown_json["data"]["enable_attachment_download"] is None  # type: ignore[index]
+
+    # Omitting the options preserves the overrides.
+    revision = catalog.show_account("alice").revision
+    updated = runner.invoke(
+        app, ["account", "update", "alice", "--expected-revision", str(revision), "--full-name", "Renamed"]
+    )
+    assert updated.exit_code == 0, updated.output
+    assert catalog.show_account("alice").enable_attachment_content is True
+
+    revision = catalog.show_account("alice").revision
+    forced = runner.invoke(
+        app,
+        [
+            "account",
+            "update",
+            "alice",
+            "--expected-revision",
+            str(revision),
+            "--attachment-content",
+            "inherit",
+            "--attachment-download",
+            "false",
+        ],
+    )
+    assert forced.exit_code == 0, forced.output
+    after = catalog.show_account("alice")
+    assert (after.enable_attachment_content, after.enable_attachment_download) == (None, False)
+
+    invalid = runner.invoke(
+        app, ["account", "update", "alice", "--expected-revision", str(after.revision), "--attachment-content", "yes"]
+    )
+    assert invalid.exit_code != 0
+    assert catalog.show_account("alice").revision == after.revision
+
+
+def test_account_update_maps_attachment_override_choices_to_the_command(monkeypatch) -> None:
+    management = MagicMock()
+    _configure_bound_management(management)
+    management.accounts.update.return_value = 8
+    monkeypatch.setattr(
+        "mcp_email_server.cli.get_application_runtime",
+        lambda: SimpleNamespace(management=management),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "account",
+            "update",
+            "contabilidad",
+            "--expected-revision",
+            "7",
+            "--attachment-content",
+            "true",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    command = management.accounts.update.call_args.args[0]
+    assert command.enable_attachment_content is True
+    assert command.update_attachment_content is True
+    assert command.enable_attachment_download is None
+    assert command.update_attachment_download is False

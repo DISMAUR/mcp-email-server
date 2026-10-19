@@ -290,7 +290,11 @@ def test_v3_catalog_migrates_to_v5_without_losing_accounts_policy_or_secrets(tmp
     assert details.sent_folder_name == "Sent"
 
     with closing(sqlite3.connect(catalog.path)) as connection:
-        assert connection.execute("SELECT version FROM schema_metadata").fetchone()[0] == 6
+        assert (
+            connection.execute("SELECT version FROM schema_metadata").fetchone()[0]
+            == managed_module.SCHEMA_VERSION
+            == 7
+        )
         assert connection.execute("SELECT enable_attachment_content FROM catalog").fetchone()[0] == 0
         assert connection.execute("SELECT tags_json FROM managed_account").fetchone()[0] == "[]"
 
@@ -1413,3 +1417,152 @@ def test_import_cutover_guard_detects_account_only_credential_drift(tmp_path: Pa
             expected_account_revisions=(("alice", 2, True),),
         ):
             pytest.fail("stale account authority must not enter the cutover critical section")
+
+
+def _v6_catalog(tmp_path: Path) -> ManagedCatalog:
+    """Build an exact schema-v6 catalog with one account, as released before attachment overrides."""
+    parent = _private_directory(tmp_path / "managed-v6")
+    path = parent / "catalog.sqlite3"
+    path.touch(mode=0o600)
+    _harden_private_test_file(path)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(managed_module._SCHEMA_V6)
+        connection.execute("INSERT INTO schema_metadata(singleton, version) VALUES (1, 6)")
+        connection.execute(
+            """INSERT INTO catalog(
+                   id, revision, enable_attachment_download, enable_attachment_content,
+                   allowed_recipients_json, allowed_senders_json, report_blocked_mutations
+               ) VALUES ('local', 9, 0, 1, '["*@cliente.example"]', '[]', 0)"""
+        )
+        connection.execute(
+            """INSERT INTO managed_account(
+                   id, catalog_id, name, normalized_name, full_name, email_address,
+                   enabled, revision, save_to_sent, sent_folder_name, removed_at,
+                   allowed_mutations_json, drafts_mailbox, allow_protocol_commands
+               ) VALUES (
+                   'account-1', 'local', 'contabilidad', 'contabilidad', 'Contabilidad',
+                   'contabilidad@example.test', 1, 4, 1, NULL, NULL, '["draft","send"]', 'Borradores', 1
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO endpoint(
+                   account_id, role, host, port, use_ssl, start_ssl, verify_ssl, user_name
+               ) VALUES ('account-1', 'incoming', 'imap.example.test', 993, 1, 0, 1, 'contabilidad@example.test')"""
+        )
+        connection.execute(
+            """INSERT INTO secret_binding(
+                   id, account_id, role, status, opaque_locator, supersedes_id
+               ) VALUES ('binding-1', 'account-1', 'incoming', 'ACTIVE', 'locator-1', NULL)"""
+        )
+        connection.execute("INSERT INTO managed_secret(locator, secret_value) VALUES ('locator-1', 'stored-secret')")
+        connection.commit()
+    return ManagedCatalog(path, secret_store=ManagedSqliteSecretStore(path))
+
+
+def test_v6_catalog_migrates_additively_and_existing_accounts_inherit_attachment_policy(tmp_path: Path) -> None:
+    catalog = _v6_catalog(tmp_path)
+
+    details = catalog.show_account("contabilidad")
+    assert details.enable_attachment_content is None
+    assert details.enable_attachment_download is None
+    # Every pre-existing value, revision, and secret survives unchanged.
+    assert details.revision == 4
+    assert details.allowed_mutations == ("draft", "send")
+    assert details.drafts_mailbox == "Borradores"
+    assert details.allow_protocol_commands is True
+    assert catalog.catalog_revision() == 9
+    assert catalog.policy().enable_attachment_content is True
+    resolved = catalog.resolve_account("contabilidad")
+    assert resolved.account.enable_attachment_content is None
+    assert resolved.account.attachment_content_enabled(resolved.policy.enable_attachment_content) is True
+    assert resolved.account.incoming.password.get_secret_value() == "stored-secret"
+    with closing(sqlite3.connect(catalog.path)) as connection:
+        assert connection.execute("SELECT version FROM schema_metadata").fetchone()[0] == 7
+        assert connection.execute(
+            "SELECT enable_attachment_download, enable_attachment_content FROM managed_account"
+        ).fetchone() == (None, None)
+        connection.row_factory = sqlite3.Row
+        schema = managed_module._schema_objects(connection)
+
+    # Reopening a migrated catalog is idempotent and keeps the exact v7 schema.
+    reopened = ManagedCatalog(catalog.path, secret_store=ManagedSqliteSecretStore(catalog.path))
+    assert reopened.show_account("contabilidad").enable_attachment_content is None
+    with closing(sqlite3.connect(catalog.path)) as connection:
+        connection.row_factory = sqlite3.Row
+        assert managed_module._schema_objects(connection) == schema
+
+
+def test_failed_v7_migration_rolls_back_to_the_exact_v6_source_and_can_retry(monkeypatch, tmp_path: Path) -> None:
+    catalog = _v6_catalog(tmp_path)
+    with closing(sqlite3.connect(catalog.path)) as connection:
+        connection.row_factory = sqlite3.Row
+        original_schema = managed_module._schema_objects(connection)
+    execute_schema = managed_module._execute_schema
+
+    def fail_during_v7(connection: sqlite3.Connection, schema: str) -> None:
+        execute_schema(connection, schema)
+        if schema == managed_module._SCHEMA_V7_ADDITIONS:
+            raise RuntimeError("synthetic v7 migration failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(managed_module, "_execute_schema", fail_during_v7)
+        with pytest.raises(RuntimeError, match="synthetic v7 migration failure"):
+            catalog.show_account("contabilidad")
+
+    with closing(sqlite3.connect(catalog.path)) as connection:
+        connection.row_factory = sqlite3.Row
+        assert connection.execute("SELECT version FROM schema_metadata").fetchone()[0] == 6
+        assert managed_module._schema_objects(connection) == original_schema
+        assert connection.execute("SELECT revision FROM managed_account").fetchone()[0] == 4
+    assert catalog.show_account("contabilidad").enable_attachment_content is None
+
+
+def test_account_attachment_overrides_round_trip_and_reset_to_inherit(tmp_path: Path) -> None:
+    store = FakeSecretStore()
+    catalog = _catalog(tmp_path, store)
+    catalog.add_account(
+        name="contabilidad",
+        full_name="Contabilidad",
+        email_address="contabilidad@example.test",
+        incoming=_server(),
+        outgoing=None,
+        enable_attachment_content=True,
+        enable_attachment_download=False,
+    )
+    catalog.set_secret("contabilidad", "incoming", "secret")
+
+    details = catalog.show_account("contabilidad")
+    assert (details.enable_attachment_content, details.enable_attachment_download) == (True, False)
+    loaded = catalog.load_settings().emails[0]
+    assert (loaded.enable_attachment_content, loaded.enable_attachment_download) == (True, False)
+
+    # An unrelated update leaves both overrides untouched.
+    revision = catalog.update_account("contabilidad", expected_revision=details.revision, full_name="Contab")
+    assert catalog.show_account("contabilidad").enable_attachment_content is True
+
+    revision = catalog.update_account(
+        "contabilidad",
+        expected_revision=revision,
+        enable_attachment_content=None,
+        update_attachment_content=True,
+    )
+    after_reset = catalog.show_account("contabilidad")
+    assert after_reset.enable_attachment_content is None
+    assert after_reset.enable_attachment_download is False
+
+    catalog.update_account(
+        "contabilidad",
+        expected_revision=revision,
+        enable_attachment_download=True,
+        update_attachment_download=True,
+    )
+    assert catalog.show_account("contabilidad").enable_attachment_download is True
+    assert catalog.resolve_account("contabilidad").account.enable_attachment_download is True
+
+
+def test_attachment_override_columns_reject_values_outside_inherit_false_true(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    _add_account(catalog)
+
+    with closing(sqlite3.connect(catalog.path)) as connection, pytest.raises(sqlite3.IntegrityError):
+        connection.execute("UPDATE managed_account SET enable_attachment_content = 2")

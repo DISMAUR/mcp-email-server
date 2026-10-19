@@ -2135,7 +2135,7 @@
         },
         {
             "name": "get_attachment_content",
-            "description": "Read one email attachment as an MCP embedded binary resource without writing a local file. This independent transfer mode requires enable_attachment_content=true.",
+            "description": "Read one email attachment as an MCP embedded binary resource without writing a local file. This independent transfer mode requires enable_attachment_content=true for the account; an account setting overrides the global one. Attachments up to about 6 MiB fit the MCP result limit.",
             "inputSchema": {
                 "properties": {
                     "account_name": {
@@ -2178,7 +2178,7 @@
         },
         {
             "name": "download_attachment",
-            "description": "Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled in settings (enable_attachment_download=true) due to security considerations.",
+            "description": "Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled (enable_attachment_download=true for the account or globally; an account setting overrides the global one) due to security considerations.",
             "inputSchema": {
                 "properties": {
                     "account_name": {

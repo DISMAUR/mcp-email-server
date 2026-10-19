@@ -15,6 +15,7 @@ from mcp_email_server.application.accounts import AvailableAccount, EffectiveCon
 from mcp_email_server.application.limits import (
     APPLICATION_LIMITS,
     base64_encoded_length,
+    largest_base64_payload_bytes,
     validate_serialized_result,
 )
 from mcp_email_server.application.metadata import ListEmailMetadataQuery
@@ -1402,7 +1403,8 @@ async def create_mailbox(
 @mcp.tool(
     description=(
         "Read one email attachment as an MCP embedded binary resource without writing a local file. "
-        "This independent transfer mode requires enable_attachment_content=true."
+        "This independent transfer mode requires enable_attachment_content=true for the account; an account "
+        "setting overrides the global one. Attachments up to about 6 MiB fit the MCP result limit."
     ),
     annotations=_READ_ONLY_REMOTE,
 )
@@ -1439,10 +1441,11 @@ async def get_attachment_content(
         )
     )
     uri = f"email-attachment://content/{secrets.token_urlsafe(18)}"
+    blob = base64.b64encode(payload.content).decode("ascii")
     resource = BlobResourceContents.model_validate({
         "uri": uri,
         "mimeType": payload.mime_type,
-        "blob": base64.b64encode(payload.content).decode("ascii"),
+        "blob": blob,
     })
     embedded = EmbeddedResource.model_validate({
         "type": "resource",
@@ -1453,15 +1456,22 @@ async def get_attachment_content(
         },
     })
     result = CallToolResult(content=[embedded])
+    serialized = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
     try:
-        validate_serialized_result(result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8"))
-    except ValueError:
-        raise ValueError("serialized attachment content exceeds the global result limit") from None
+        validate_serialized_result(serialized)
+    except ValueError as exc:
+        largest = largest_base64_payload_bytes(len(serialized) - len(blob))
+        raise ValueError(
+            f"limit_exceeded: the {len(payload.content)}-byte attachment would produce a {len(serialized)}-byte "
+            f"MCP result ({exc}, the global result limit). Attachments up to about "
+            f"{largest / (1_024 * 1_024):.1f} MiB ({largest} bytes) fit; use download_attachment where it is "
+            "enabled, or ask for a smaller file."
+        ) from None
     return result
 
 
 @mcp.tool(
-    description="Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled in settings (enable_attachment_download=true) due to security considerations.",
+    description="Download an email attachment. By default it is saved with a safe randomized name under the current user's Downloads/mcp-email-server directory; an explicit destination path remains supported. This feature must be explicitly enabled (enable_attachment_download=true for the account or globally; an account setting overrides the global one) due to security considerations.",
     annotations=_FILESYSTEM_WRITE,
 )
 async def download_attachment(

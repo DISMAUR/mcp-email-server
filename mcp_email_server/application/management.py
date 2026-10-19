@@ -123,6 +123,9 @@ class AccountDetails:
     allowed_mutations: tuple[MutationClass, ...] | None = None
     drafts_mailbox: str | None = None
     allow_protocol_commands: bool = False
+    # None inherits the catalog policy; True/False override it for this account.
+    enable_attachment_download: bool | None = None
+    enable_attachment_content: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +277,8 @@ class CreateAccountCommand:
     allowed_mutations: tuple[MutationClass, ...] | None = None
     drafts_mailbox: str | None = None
     allow_protocol_commands: bool = False
+    enable_attachment_download: bool | None = None
+    enable_attachment_content: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -334,6 +339,11 @@ class UpdateAccountCommand:
     drafts_mailbox: str | None = None
     allow_protocol_commands: bool | None = None
     update_drafts_mailbox: bool = False
+    # Explicit update flags distinguish "reset to inherit" (None) from "unchanged".
+    enable_attachment_download: bool | None = None
+    update_attachment_download: bool = False
+    enable_attachment_content: bool | None = None
+    update_attachment_content: bool = False
 
 
 @dataclass(frozen=True)
@@ -351,6 +361,8 @@ class LegacyAccountSnapshot:
     allowed_mutations: tuple[MutationClass, ...] | None = None
     drafts_mailbox: str | None = None
     allow_protocol_commands: bool = False
+    enable_attachment_download: bool | None = None
+    enable_attachment_content: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -483,6 +495,8 @@ class ManagedCatalogPort(Protocol):
         drafts_mailbox: str | None = None,
         allow_protocol_commands: bool = False,
         expected_revision: int | None = None,
+        enable_attachment_download: bool | None = None,
+        enable_attachment_content: bool | None = None,
     ) -> str: ...
 
     def set_secret(
@@ -520,6 +534,10 @@ class ManagedCatalogPort(Protocol):
         drafts_mailbox: str | None = None,
         update_drafts_mailbox: bool = False,
         allow_protocol_commands: bool | None = None,
+        enable_attachment_download: bool | None = None,
+        update_attachment_download: bool = False,
+        enable_attachment_content: bool | None = None,
+        update_attachment_content: bool = False,
     ) -> int: ...
 
     def disable_account(self, name: str, *, expected_revision: int) -> int: ...
@@ -911,6 +929,8 @@ class ManagedAccountService(_ConfiguredCatalogService):
             drafts_mailbox=command.drafts_mailbox,
             allow_protocol_commands=command.allow_protocol_commands,
             expected_revision=command.expected_catalog_revision,
+            enable_attachment_download=command.enable_attachment_download,
+            enable_attachment_content=command.enable_attachment_content,
         )
         incoming = catalog.set_secret(
             command.name,
@@ -974,6 +994,10 @@ class ManagedAccountService(_ConfiguredCatalogService):
             allowed_mutations=command.allowed_mutations,
             drafts_mailbox=command.drafts_mailbox,
             allow_protocol_commands=command.allow_protocol_commands,
+            enable_attachment_download=command.enable_attachment_download,
+            update_attachment_download=command.update_attachment_download,
+            enable_attachment_content=command.enable_attachment_content,
+            update_attachment_content=command.update_attachment_content,
         )
 
     def disable(self, name: str, *, expected_revision: int) -> int:
@@ -1063,6 +1087,8 @@ class LegacyImportService(_ConfiguredCatalogService):
             and source.allowed_mutations == destination.allowed_mutations
             and source.drafts_mailbox == destination.drafts_mailbox
             and source.allow_protocol_commands == destination.allow_protocol_commands
+            and source.enable_attachment_download == destination.enable_attachment_download
+            and source.enable_attachment_content == destination.enable_attachment_content
             and source.sent_folder_name == destination.sent_folder_name
             and source.tags == destination.tags
         )
@@ -1374,6 +1400,8 @@ class LegacyImportService(_ConfiguredCatalogService):
                         allowed_mutations=account.allowed_mutations,
                         drafts_mailbox=account.drafts_mailbox,
                         allow_protocol_commands=account.allow_protocol_commands,
+                        enable_attachment_download=account.enable_attachment_download,
+                        enable_attachment_content=account.enable_attachment_content,
                         tags=account.tags,
                     )
                 )

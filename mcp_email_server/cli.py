@@ -53,6 +53,46 @@ class ConnectionRole(enum.StrEnum):
     outgoing = "outgoing"
 
 
+class AccountAttachmentAccess(enum.StrEnum):
+    """Per-account attachment override: inherit the global policy or force it."""
+
+    inherit = "inherit"
+    true = "true"
+    false = "false"
+
+    def override(self) -> bool | None:
+        return None if self is AccountAttachmentAccess.inherit else self is AccountAttachmentAccess.true
+
+
+def _override_text(value: bool | None) -> str:
+    return "inherit" if value is None else str(value).lower()
+
+
+_ATTACHMENT_CONTENT_HELP = (
+    "Per-account get_attachment_content access: inherit the global enable_attachment_content policy, "
+    "or force it true/false for this account."
+)
+_ATTACHMENT_DOWNLOAD_HELP = (
+    "Per-account download_attachment access: inherit the global enable_attachment_download policy, "
+    "or force it true/false for this account."
+)
+_KEEP_CURRENT_HELP = " Omit to keep the current value."
+AttachmentContentOption = Annotated[
+    AccountAttachmentAccess, typer.Option("--attachment-content", help=_ATTACHMENT_CONTENT_HELP)
+]
+AttachmentDownloadOption = Annotated[
+    AccountAttachmentAccess, typer.Option("--attachment-download", help=_ATTACHMENT_DOWNLOAD_HELP)
+]
+AttachmentContentUpdateOption = Annotated[
+    AccountAttachmentAccess | None,
+    typer.Option("--attachment-content", help=_ATTACHMENT_CONTENT_HELP + _KEEP_CURRENT_HELP),
+]
+AttachmentDownloadUpdateOption = Annotated[
+    AccountAttachmentAccess | None,
+    typer.Option("--attachment-download", help=_ATTACHMENT_DOWNLOAD_HELP + _KEEP_CURRENT_HELP),
+]
+
+
 LOOPBACK_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 LOOPBACK_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 WILDCARD_IPV4_BIND_HOST = "0.0.0.0"  # noqa: S104
@@ -382,6 +422,8 @@ def _legacy_import_plan_data(plan: LegacyImportPlan) -> dict[str, object]:
                 "allowed_mutations": list(source.allowed_mutations) if source.allowed_mutations is not None else None,
                 "drafts_mailbox": source.drafts_mailbox,
                 "allow_protocol_commands": source.allow_protocol_commands,
+                "enable_attachment_download": source.enable_attachment_download,
+                "enable_attachment_content": source.enable_attachment_content,
             },
             "incoming": {
                 **_endpoint_data(source.incoming),
@@ -711,6 +753,10 @@ def _echo_legacy_import_plan(plan: LegacyImportPlan) -> None:
             f"save_to_sent={str(source.save_to_sent).lower()} sent_folder={source.sent_folder_name or 'default'}"
         )
         typer.echo(f"  allow_protocol_commands={str(source.allow_protocol_commands).lower()}")
+        typer.echo(
+            f"  attachment_download={_override_text(source.enable_attachment_download)} "
+            f"attachment_content={_override_text(source.enable_attachment_content)}"
+        )
         typer.echo(f"  tags={json.dumps([_tag_data(tag) for tag in source.tags], separators=(',', ':'))}")
         incoming = source.incoming
         typer.echo(
@@ -840,6 +886,8 @@ def account_add(
     ),
     drafts_mailbox: str | None = typer.Option(None, "--drafts-mailbox"),
     sent_folder: str | None = typer.Option(None, "--sent-folder"),
+    attachment_content: AttachmentContentOption = AccountAttachmentAccess.inherit,
+    attachment_download: AttachmentDownloadOption = AccountAttachmentAccess.inherit,
     json_output: JsonOutput = False,
 ) -> None:
     """Add one managed account; secrets are prompted or read from stdin, never argv."""
@@ -914,6 +962,8 @@ def account_add(
                 else parse_mutations(_split_csv(allowed_mutations)),
                 drafts_mailbox=drafts_mailbox or None,
                 allow_protocol_commands=allow_protocol_commands,
+                enable_attachment_content=attachment_content.override(),
+                enable_attachment_download=attachment_download.override(),
             )
         )
     except (ManagementError, ValueError) as exc:
@@ -1056,6 +1106,8 @@ def account_show(name: str, json_output: JsonOutput = False) -> None:
                 "allowed_mutations": list(account.allowed_mutations) if account.allowed_mutations is not None else None,
                 "drafts_mailbox": account.drafts_mailbox,
                 "allow_protocol_commands": account.allow_protocol_commands,
+                "enable_attachment_download": account.enable_attachment_download,
+                "enable_attachment_content": account.enable_attachment_content,
                 "incoming": _endpoint_data(account.incoming),
                 "outgoing": _endpoint_data(account.outgoing) if account.outgoing is not None else None,
                 "incoming_binding": account.incoming_binding,
@@ -1071,6 +1123,8 @@ def account_show(name: str, json_output: JsonOutput = False) -> None:
     typer.echo(f"revision={account.revision}")
     typer.echo(f"save_to_sent={str(account.save_to_sent).lower()}")
     typer.echo(f"allow_protocol_commands={str(account.allow_protocol_commands).lower()}")
+    typer.echo(f"enable_attachment_download={_override_text(account.enable_attachment_download)}")
+    typer.echo(f"enable_attachment_content={_override_text(account.enable_attachment_content)}")
     typer.echo(f"sent_folder={account.sent_folder_name or 'default'}")
     typer.echo(f"tags={json.dumps([_tag_data(tag) for tag in account.tags], separators=(',', ':'))}")
     typer.echo(f"incoming_host={account.incoming.host}")
@@ -1122,6 +1176,8 @@ def account_update(
     drafts_mailbox: str | None = typer.Option(None, "--drafts-mailbox"),
     sent_folder: str | None = typer.Option(None, "--sent-folder"),
     clear_sent_folder: bool = typer.Option(False, "--clear-sent-folder"),
+    attachment_content: AttachmentContentUpdateOption = None,
+    attachment_download: AttachmentDownloadUpdateOption = None,
     json_output: JsonOutput = False,
 ) -> None:
     """Update account fields and endpoints using an optimistic revision."""
@@ -1164,6 +1220,10 @@ def account_update(
                 update_allowed_mutations=allowed_mutations is not None,
                 update_drafts_mailbox=drafts_mailbox is not None,
                 update_sent_folder=sent_folder is not None or clear_sent_folder,
+                enable_attachment_content=attachment_content.override() if attachment_content is not None else None,
+                update_attachment_content=attachment_content is not None,
+                enable_attachment_download=attachment_download.override() if attachment_download is not None else None,
+                update_attachment_download=attachment_download is not None,
             )
         )
     except (ManagementError, ValueError) as exc:

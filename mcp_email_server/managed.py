@@ -50,7 +50,7 @@ from mcp_email_server.windows_security import (
     windows_security_supported,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _MIGRATION_SOURCE_VERSION = 3
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 WAL_RETRY_BUSY_TIMEOUT_MS = 100
@@ -128,6 +128,8 @@ class _ManagedAuthoritySnapshot:
     allowed_mutations: tuple[MutationClass, ...] | None
     drafts_mailbox: str | None
     allow_protocol_commands: bool
+    enable_attachment_download: bool | None
+    enable_attachment_content: bool | None
     incoming: EndpointSummary
     outgoing: EndpointSummary | None
     binding_ids: tuple[tuple[BindingRole, str], ...]
@@ -698,7 +700,17 @@ ALTER TABLE managed_account
     ADD COLUMN allow_protocol_commands INTEGER NOT NULL DEFAULT 0
         CHECK (allow_protocol_commands IN (0, 1));
 """
-_SCHEMA = _SCHEMA_V5 + _SCHEMA_V6_ADDITIONS
+_SCHEMA_V6 = _SCHEMA_V5 + _SCHEMA_V6_ADDITIONS
+# NULL inherits the catalog policy; 0/1 force it for one account.
+_SCHEMA_V7_ADDITIONS = """
+ALTER TABLE managed_account
+    ADD COLUMN enable_attachment_download INTEGER
+        CHECK (enable_attachment_download IS NULL OR enable_attachment_download IN (0, 1));
+ALTER TABLE managed_account
+    ADD COLUMN enable_attachment_content INTEGER
+        CHECK (enable_attachment_content IS NULL OR enable_attachment_content IN (0, 1));
+"""
+_SCHEMA = _SCHEMA_V6 + _SCHEMA_V7_ADDITIONS
 _OPERATIONAL_DATABASE_SCHEMA = (
     """
 CREATE TABLE schema_metadata (
@@ -768,6 +780,19 @@ def _require_migration_source(version: int) -> None:
 def _require_migration_update(cursor: sqlite3.Cursor) -> None:
     if cursor.rowcount != 1:
         raise ManagedCatalogError("Managed catalog schema changed during migration")
+
+
+def _optional_flag(value: object) -> bool | None:
+    """Map a nullable account override column to inherit/False/True."""
+    if value is None:
+        return None
+    if value not in (0, 1):
+        raise ManagedCatalogError("Managed account attachment policy is invalid")
+    return bool(value)
+
+
+def _optional_flag_column(value: bool | None) -> int | None:
+    return None if value is None else int(value)
 
 
 def _parse_tags_json(value: object) -> tuple[ImapKeywordTag, ...]:
@@ -858,6 +883,8 @@ class ManagedCatalog:
             raise ManagedCatalogError("Managed catalog is corrupt or schema is missing or incompatible") from exc
         if version == SCHEMA_VERSION:
             _validate_managed_schema(connection, _SCHEMA)
+        elif version == 6:
+            _validate_managed_schema(connection, _SCHEMA_V6)
         elif version == 5:
             _validate_managed_schema(connection, _SCHEMA_V5)
         elif version == 4:
@@ -885,11 +912,16 @@ class ManagedCatalog:
                 _validate_managed_schema(connection, _SCHEMA_V4)
             elif version == 5:
                 _validate_managed_schema(connection, _SCHEMA_V5)
+            elif version == 6:
+                _validate_managed_schema(connection, _SCHEMA_V6)
             else:
                 _require_migration_source(version)
             if version < 5:
                 _execute_schema(connection, _SCHEMA_V5_ADDITIONS)
-            _execute_schema(connection, _SCHEMA_V6_ADDITIONS)
+            if version < 6:
+                _execute_schema(connection, _SCHEMA_V6_ADDITIONS)
+            # Existing accounts receive NULL overrides and keep inheriting policy.
+            _execute_schema(connection, _SCHEMA_V7_ADDITIONS)
             _validate_managed_schema(connection, _SCHEMA)
             _validate_managed_invariants(connection)
             updated = connection.execute(
@@ -907,7 +939,7 @@ class ManagedCatalog:
         with _connect(self.path, enable_wal=False) as connection:
             version = self._preflight_schema_ownership(connection)
         with _connect(self.path) as connection:
-            if version in (3, 4, 5):
+            if version in (3, 4, 5, 6):
                 self._migrate_to_current_schema(connection)
             self._validate_schema(connection)
             yield connection
@@ -1056,6 +1088,8 @@ class ManagedCatalog:
         drafts_mailbox: str | None = None,
         allow_protocol_commands: bool = False,
         expected_revision: int | None = None,
+        enable_attachment_download: bool | None = None,
+        enable_attachment_content: bool | None = None,
     ) -> str:
         _validate_account_mutation_policy(allowed_mutations, drafts_mailbox)
         if not name.strip() or not full_name.strip() or not email_address.strip():
@@ -1110,11 +1144,14 @@ class ManagedCatalog:
                 )
                 connection.execute(
                     "UPDATE managed_account SET allowed_mutations_json = ?, drafts_mailbox = ?, "
-                    "allow_protocol_commands = ? WHERE id = ?",
+                    "allow_protocol_commands = ?, enable_attachment_download = ?, "
+                    "enable_attachment_content = ? WHERE id = ?",
                     (
                         json.dumps(allowed_mutations) if allowed_mutations is not None else None,
                         drafts_mailbox,
                         int(allow_protocol_commands),
+                        _optional_flag_column(enable_attachment_download),
+                        _optional_flag_column(enable_attachment_content),
                         account_id,
                     ),
                 )
@@ -1427,6 +1464,8 @@ class ManagedCatalog:
             else None,
             drafts_mailbox=account["drafts_mailbox"],
             allow_protocol_commands=bool(account["allow_protocol_commands"]),
+            enable_attachment_download=_optional_flag(account["enable_attachment_download"]),
+            enable_attachment_content=_optional_flag(account["enable_attachment_content"]),
             incoming=incoming,
             outgoing=endpoints.get("outgoing"),
             incoming_binding=bindings.get("incoming", "MISSING"),
@@ -1474,6 +1513,10 @@ class ManagedCatalog:
         drafts_mailbox: str | None = None,
         update_drafts_mailbox: bool = False,
         allow_protocol_commands: bool | None = None,
+        enable_attachment_download: bool | None = None,
+        update_attachment_download: bool = False,
+        enable_attachment_content: bool | None = None,
+        update_attachment_content: bool = False,
     ) -> int:
         _validate_account_mutation_policy(allowed_mutations, drafts_mailbox)
         if expected_revision < 1:
@@ -1500,6 +1543,8 @@ class ManagedCatalog:
             validated_tags is not None,
             update_allowed_mutations,
             update_drafts_mailbox,
+            update_attachment_download,
+            update_attachment_content,
         )):
             raise ManagedCatalogError("Account update did not specify any changes")
 
@@ -1523,6 +1568,14 @@ class ManagedCatalog:
                     sent_folder_name=sent_folder_name,
                     update_sent_folder=update_sent_folder,
                     tags=validated_tags,
+                    attachment_overrides=tuple(
+                        (column, value)
+                        for column, value, requested in (
+                            ("enable_attachment_download", enable_attachment_download, update_attachment_download),
+                            ("enable_attachment_content", enable_attachment_content, update_attachment_content),
+                        )
+                        if requested
+                    ),
                 )
                 if update_allowed_mutations or update_drafts_mailbox:
                     row = connection.execute(
@@ -1566,6 +1619,7 @@ class ManagedCatalog:
         sent_folder_name: str | None,
         update_sent_folder: bool,
         tags: tuple[ImapKeywordTag, ...] | None,
+        attachment_overrides: tuple[tuple[str, bool | None], ...] = (),
     ) -> None:
         account = connection.execute(
             """SELECT id, enabled, revision FROM managed_account
@@ -1619,6 +1673,11 @@ class ManagedCatalog:
         if tags is not None:
             assignments.append("tags_json = ?")
             values.append(json.dumps([tag.model_dump(mode="json") for tag in tags]))
+        for column, override in attachment_overrides:
+            if column not in ("enable_attachment_download", "enable_attachment_content"):
+                raise ManagedCatalogError("Managed account attachment policy is invalid")
+            assignments.append(f"{column} = ?")
+            values.append(_optional_flag_column(override))
         values.extend((account["id"], expected_revision))
         cursor = connection.execute(
             f"UPDATE managed_account SET {', '.join(assignments)} WHERE id = ? AND revision = ?",  # noqa: S608
@@ -2048,6 +2107,8 @@ class ManagedCatalog:
             else None,
             drafts_mailbox=account["drafts_mailbox"],
             allow_protocol_commands=bool(account["allow_protocol_commands"]),
+            enable_attachment_download=_optional_flag(account["enable_attachment_download"]),
+            enable_attachment_content=_optional_flag(account["enable_attachment_content"]),
             incoming=self._endpoint_summary(incoming_row),
             outgoing=self._endpoint_summary(outgoing_row) if outgoing_row is not None else None,
             binding_ids=tuple((role, bindings[role]["id"]) for role in sorted(bindings)),
@@ -2102,6 +2163,8 @@ class ManagedCatalog:
                 allowed_mutations=list(current.allowed_mutations) if current.allowed_mutations is not None else None,
                 drafts_mailbox=current.drafts_mailbox,
                 allow_protocol_commands=current.allow_protocol_commands,
+                enable_attachment_download=current.enable_attachment_download,
+                enable_attachment_content=current.enable_attachment_content,
                 tags=current.tags,
             ),
             policy=current.policy,
@@ -2169,6 +2232,8 @@ class ManagedCatalog:
                         else None,
                         drafts_mailbox=account["drafts_mailbox"],
                         allow_protocol_commands=bool(account["allow_protocol_commands"]),
+                        enable_attachment_download=_optional_flag(account["enable_attachment_download"]),
+                        enable_attachment_content=_optional_flag(account["enable_attachment_content"]),
                     )
                 )
             policy = self._policy_from_row(catalog)

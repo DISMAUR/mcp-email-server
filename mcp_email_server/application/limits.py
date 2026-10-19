@@ -121,6 +121,13 @@ def validate_optional_controlled_string(
     )
 
 
+def largest_base64_payload_bytes(overhead_bytes: int) -> int:
+    """Return the largest decoded payload whose base64 still fits the serialized-result ceiling."""
+
+    available = APPLICATION_LIMITS.serialized_response_bytes - max(0, overhead_bytes)
+    return max(0, available // 4 * 3)
+
+
 def validate_serialized_result(serialized: bytes) -> None:
     """Reject a canonically encoded application result above the shared ceiling."""
 

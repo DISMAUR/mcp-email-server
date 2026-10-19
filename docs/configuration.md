@@ -365,10 +365,10 @@ expunge, arbitrary flags and keywords, and raw MIME access without focused-tool
 filtering, semantic tags or destination safeguards. Existing tools retain their
 current restrictions. The executor rejects incompatible profiles:
 
-| Protocol | Required in addition to the opt-in                                                                                            |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| IMAP     | Enabled incoming account; effective `organize`, `delete`, `append`; empty `allowed_senders`; `enable_attachment_content=true` |
-| SMTP     | Enabled outgoing account; effective `send`; explicit `*` in `allowed_recipients` (empty denies all)                           |
+| Protocol | Required in addition to the opt-in                                                                                                                                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IMAP     | Enabled incoming account; effective `organize`, `delete`, `append`; empty `allowed_senders`; effective `enable_attachment_content=true` (account value or global) |
+| SMTP     | Enabled outgoing account; effective `send`; explicit `*` in `allowed_recipients` (empty denies all)                                                               |
 
 The server never changes grants or filters to satisfy this gate. An organize-only
 account must use focused tools even for a raw read or COPY. MCP cannot enable
@@ -521,23 +521,26 @@ platform-selected secret binding, and the operational projection. On Linux and
 Windows, any copy, snapshot, or backup of this database includes plaintext values
 from `managed_secret`; protect every copy with private access equivalent to the
 original and never treat the catalog as a non-secret database. Schema v3, v4,
-and v5 catalogs migrate automatically to v6 on the first catalog access. The
+v5, and v6 catalogs migrate automatically to v7 on the first catalog access. The
 transaction preserves accounts, policy, bindings, secrets, and revisions; it adds
+inheriting (`NULL`) per-account attachment overrides and, for sources before v6,
 default-disabled protocol access. Sources before v5 also receive all five global
 mutation grants, inheriting account overrides, and an unset draft mailbox. A v3
 source additionally receives empty account tag mappings and the disabled
-attachment-content policy. Exact schema and invariant checks finish before v6
+attachment-content policy. Exact schema and invariant checks finish before v7
 is recorded; failure leaves the original version intact. Other unsupported
 versions, corrupt storage, and insecure storage fail closed. Legacy TOML,
 environment, and keyring sources remain supported through explicit import. In
 legacy mode, an unavailable or unsafe operational database produces a bounded
 warning and the metadata query uses its bounded IMAP fallback instead.
 
-### Upgrading a managed catalog to v6
+### Upgrading a managed catalog to v7
 
-Managed v3/v4/v5 catalogs migrate transactionally to v6. The new protocol-access
-flag defaults to false for every existing account; account grants and other
-configuration remain intact. Migration never reads credential values.
+Managed v3/v4/v5/v6 catalogs migrate transactionally to v7. The v6 protocol-access
+flag defaults to false for every existing account, and the v7 per-account
+attachment overrides start as inherit (`NULL`), so attachment access is unchanged
+until a user sets them. Account grants and other configuration remain intact.
+Migration never reads credential values.
 
 1. Stop every MCP, UI, and CLI process using the selected catalog before opening
    it with the new application. Even an inspection command can trigger migration.
@@ -548,7 +551,7 @@ configuration remain intact. Migration never reads credential values.
 3. Upgrade UI, CLI, and MCP together to the same release, then restart each MCP
    client. Do not leave an older process sharing the newly migrated catalog.
 
-Versions that only understand v3/v4/v5 cannot open v6. Downgrading only the package
+Versions that only understand earlier schemas cannot open v7. Downgrading only the package
 is therefore insufficient: stop the new processes and restore the matching
 pre-upgrade catalog and bootstrap with the older application. This restores
 local configuration to the backup point, not provider-side email effects or
@@ -787,6 +790,60 @@ it with `mcp-email-server config policy`. The current managed policy is applied
 when each account is resolved, independently of `enable_attachment_download`;
 legacy TOML and environment flags do not override it.
 
+### Per-account attachment access
+
+`enable_attachment_content` (for `get_attachment_content`) and
+`enable_attachment_download` (for `download_attachment`) can also be set on one
+account. Each account value is tri-state:
+
+| Account value     | Effective policy for that account                   |
+| ----------------- | --------------------------------------------------- |
+| omitted / inherit | the current global value (default `false`)          |
+| `true`            | enabled for this account, even if the global is off |
+| `false`           | disabled for this account, even if the global is on |
+
+With the defaults nothing changes: every account inherits the disabled global
+policies. The two settings stay independent, so enabling content transfer does
+not allow filesystem downloads. The effective value is checked when the request
+is resolved, again when the provider is opened, and again after the fetch, so a
+revocation applies to the next check. A denied call names the account, for
+example `Attachment content transfer is disabled for account 'info'.` The MCP
+tools stay in the static catalog; they are not hidden for disabled accounts.
+
+To let only the `contabilidad` account read attachment content (for example PDF
+invoices) while `info` stays disabled, in legacy TOML:
+
+```toml
+enable_attachment_content = false   # global default; may be omitted
+
+[[emails]]
+account_name = "info"
+# no override: inherits the global false
+
+[[emails]]
+account_name = "contabilidad"
+enable_attachment_content = true
+```
+
+In managed mode use the revision-checked account CLI; `inherit` resets an
+account to the global policy and omitting the option keeps the current value:
+
+```bash
+mcp-email-server account show contabilidad --json   # read the current revision
+mcp-email-server account update contabilidad --expected-revision 5 --attachment-content true
+mcp-email-server account update contabilidad --expected-revision 6 --attachment-content inherit
+```
+
+`account add` accepts the same `--attachment-content` and
+`--attachment-download` options (`inherit`, `true`, or `false`; default
+`inherit`). `account show` reports `enable_attachment_content` and
+`enable_attachment_download` as `inherit`, `true`, or `false` (JSON: `null`,
+`true`, or `false`). The local management UI preserves these values but does not
+edit them yet; use the CLI. For the environment-created legacy account, set
+`MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_CONTENT` or
+`MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_DOWNLOAD`; unset inherits. Legacy
+import copies explicit account values and keeps omitted ones inheriting.
+
 See [Security](security.md) before enabling attachment downloads or applying
 allowlists.
 
@@ -809,31 +866,33 @@ after changing legacy TOML.
 
 ### Account variables
 
-| Variable                                     | Default                   | Required | Description                                                                                                                                 |
-| -------------------------------------------- | ------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MCP_EMAIL_SERVER_ACCOUNT_NAME`              | `default`                 | No       | Account identifier used by MCP tools.                                                                                                       |
-| `MCP_EMAIL_SERVER_FULL_NAME`                 | Email local part          | No       | Display name used in outgoing messages.                                                                                                     |
-| `MCP_EMAIL_SERVER_EMAIL_ADDRESS`             | None                      | Yes      | Account email address.                                                                                                                      |
-| `MCP_EMAIL_SERVER_USER_NAME`                 | Email address             | No       | Shared IMAP and SMTP username.                                                                                                              |
-| `MCP_EMAIL_SERVER_PASSWORD`                  | None                      | Yes      | Shared password and required environment-account trigger.                                                                                   |
-| `MCP_EMAIL_SERVER_IMAP_HOST`                 | None                      | Yes      | IMAP server host.                                                                                                                           |
-| `MCP_EMAIL_SERVER_IMAP_PORT`                 | `993`                     | No       | IMAP server port.                                                                                                                           |
-| `MCP_EMAIL_SERVER_IMAP_SSL`                  | `true`                    | No       | Use implicit TLS for IMAP.                                                                                                                  |
-| `MCP_EMAIL_SERVER_IMAP_START_SSL`            | `false`                   | No       | Upgrade the IMAP connection with STARTTLS.                                                                                                  |
-| `MCP_EMAIL_SERVER_IMAP_VERIFY_SSL`           | `true`                    | No       | Verify the IMAP TLS certificate.                                                                                                            |
-| `MCP_EMAIL_SERVER_IMAP_USER_NAME`            | Shared username           | No       | IMAP-specific username.                                                                                                                     |
-| `MCP_EMAIL_SERVER_IMAP_PASSWORD`             | Shared password           | No       | Non-empty IMAP-specific password; empty uses shared.                                                                                        |
-| `MCP_EMAIL_SERVER_SMTP_HOST`                 | None                      | No       | SMTP server host; enables sending when present.                                                                                             |
-| `MCP_EMAIL_SERVER_SMTP_PORT`                 | `465`                     | No       | SMTP server port.                                                                                                                           |
-| `MCP_EMAIL_SERVER_SMTP_SSL`                  | `true`                    | No       | Use implicit TLS for SMTP.                                                                                                                  |
-| `MCP_EMAIL_SERVER_SMTP_START_SSL`            | `false`                   | No       | Upgrade the SMTP connection with STARTTLS.                                                                                                  |
-| `MCP_EMAIL_SERVER_SMTP_VERIFY_SSL`           | `true`                    | No       | Verify the SMTP TLS certificate.                                                                                                            |
-| `MCP_EMAIL_SERVER_SMTP_USER_NAME`            | Shared username           | No       | SMTP-specific username.                                                                                                                     |
-| `MCP_EMAIL_SERVER_SMTP_PASSWORD`             | Shared password           | No       | Non-empty SMTP-specific password; empty uses shared.                                                                                        |
-| `MCP_EMAIL_SERVER_SAVE_TO_SENT`              | `true`                    | No       | Append sent messages to an IMAP Sent folder.                                                                                                |
-| `MCP_EMAIL_SERVER_SENT_FOLDER_NAME`          | Auto-detected             | No       | Override the Sent folder name.                                                                                                              |
-| `MCP_EMAIL_SERVER_ACCOUNT_ALLOWED_MUTATIONS` | Inherit global            | No       | CSV grants for the environment-created account; empty means read-only. Omit to inherit; `inherit` is a CLI value, not an environment value. |
-| `MCP_EMAIL_SERVER_DRAFTS_MAILBOX`            | Unique special-use Drafts | No       | Exact existing draft mailbox for the environment-created account; omit for discovery.                                                       |
+| Variable                                              | Default                   | Required | Description                                                                                                                                 |
+| ----------------------------------------------------- | ------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_EMAIL_SERVER_ACCOUNT_NAME`                       | `default`                 | No       | Account identifier used by MCP tools.                                                                                                       |
+| `MCP_EMAIL_SERVER_FULL_NAME`                          | Email local part          | No       | Display name used in outgoing messages.                                                                                                     |
+| `MCP_EMAIL_SERVER_EMAIL_ADDRESS`                      | None                      | Yes      | Account email address.                                                                                                                      |
+| `MCP_EMAIL_SERVER_USER_NAME`                          | Email address             | No       | Shared IMAP and SMTP username.                                                                                                              |
+| `MCP_EMAIL_SERVER_PASSWORD`                           | None                      | Yes      | Shared password and required environment-account trigger.                                                                                   |
+| `MCP_EMAIL_SERVER_IMAP_HOST`                          | None                      | Yes      | IMAP server host.                                                                                                                           |
+| `MCP_EMAIL_SERVER_IMAP_PORT`                          | `993`                     | No       | IMAP server port.                                                                                                                           |
+| `MCP_EMAIL_SERVER_IMAP_SSL`                           | `true`                    | No       | Use implicit TLS for IMAP.                                                                                                                  |
+| `MCP_EMAIL_SERVER_IMAP_START_SSL`                     | `false`                   | No       | Upgrade the IMAP connection with STARTTLS.                                                                                                  |
+| `MCP_EMAIL_SERVER_IMAP_VERIFY_SSL`                    | `true`                    | No       | Verify the IMAP TLS certificate.                                                                                                            |
+| `MCP_EMAIL_SERVER_IMAP_USER_NAME`                     | Shared username           | No       | IMAP-specific username.                                                                                                                     |
+| `MCP_EMAIL_SERVER_IMAP_PASSWORD`                      | Shared password           | No       | Non-empty IMAP-specific password; empty uses shared.                                                                                        |
+| `MCP_EMAIL_SERVER_SMTP_HOST`                          | None                      | No       | SMTP server host; enables sending when present.                                                                                             |
+| `MCP_EMAIL_SERVER_SMTP_PORT`                          | `465`                     | No       | SMTP server port.                                                                                                                           |
+| `MCP_EMAIL_SERVER_SMTP_SSL`                           | `true`                    | No       | Use implicit TLS for SMTP.                                                                                                                  |
+| `MCP_EMAIL_SERVER_SMTP_START_SSL`                     | `false`                   | No       | Upgrade the SMTP connection with STARTTLS.                                                                                                  |
+| `MCP_EMAIL_SERVER_SMTP_VERIFY_SSL`                    | `true`                    | No       | Verify the SMTP TLS certificate.                                                                                                            |
+| `MCP_EMAIL_SERVER_SMTP_USER_NAME`                     | Shared username           | No       | SMTP-specific username.                                                                                                                     |
+| `MCP_EMAIL_SERVER_SMTP_PASSWORD`                      | Shared password           | No       | Non-empty SMTP-specific password; empty uses shared.                                                                                        |
+| `MCP_EMAIL_SERVER_SAVE_TO_SENT`                       | `true`                    | No       | Append sent messages to an IMAP Sent folder.                                                                                                |
+| `MCP_EMAIL_SERVER_SENT_FOLDER_NAME`                   | Auto-detected             | No       | Override the Sent folder name.                                                                                                              |
+| `MCP_EMAIL_SERVER_ACCOUNT_ALLOWED_MUTATIONS`          | Inherit global            | No       | CSV grants for the environment-created account; empty means read-only. Omit to inherit; `inherit` is a CLI value, not an environment value. |
+| `MCP_EMAIL_SERVER_DRAFTS_MAILBOX`                     | Unique special-use Drafts | No       | Exact existing draft mailbox for the environment-created account; omit for discovery.                                                       |
+| `MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_CONTENT`  | Inherit global            | No       | Per-account `get_attachment_content` override for the environment-created account. Unset inherits; set it to a boolean to force it.         |
+| `MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_DOWNLOAD` | Inherit global            | No       | Per-account `download_attachment` override for the environment-created account. Unset inherits; set it to a boolean to force it.            |
 
 Boolean values accept `true`, `1`, `yes`, or `on` as true, ignoring case. Other
 values are treated as false. Do not add surrounding whitespace to these values.

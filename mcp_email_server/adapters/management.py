@@ -50,6 +50,7 @@ from mcp_email_server.config import (
     compose_legacy_policy_environment,
     delete_settings,
     get_settings,
+    parse_optional_bool_env,
 )
 from mcp_email_server.emails.classic import ClassicEmailHandler, ImapAuthenticationError
 from mcp_email_server.managed import ManagedCatalog, ManagedCatalogError
@@ -268,6 +269,8 @@ class LocalManagementBackend:
             allowed_mutations=tuple(account.allowed_mutations) if account.allowed_mutations is not None else None,
             drafts_mailbox=account.drafts_mailbox,
             allow_protocol_commands=account.allow_protocol_commands,
+            enable_attachment_download=account.enable_attachment_download,
+            enable_attachment_content=account.enable_attachment_content,
             tags=account.tags,
         )
         cls._validate_legacy_account_snapshot(snapshot)
@@ -378,6 +381,10 @@ class LocalManagementBackend:
                 sent_folder_name=os.getenv("MCP_EMAIL_SERVER_SENT_FOLDER_NAME"),
                 drafts_mailbox=os.getenv("MCP_EMAIL_SERVER_DRAFTS_MAILBOX"),
                 allow_protocol_commands=cls._bool_environment("MCP_EMAIL_SERVER_ALLOW_PROTOCOL_COMMANDS", False),
+                enable_attachment_download=parse_optional_bool_env(
+                    "MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_DOWNLOAD"
+                ),
+                enable_attachment_content=parse_optional_bool_env("MCP_EMAIL_SERVER_ACCOUNT_ENABLE_ATTACHMENT_CONTENT"),
                 allowed_mutations=(
                     list(
                         parse_mutations([
