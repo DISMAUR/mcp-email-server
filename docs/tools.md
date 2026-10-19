@@ -402,7 +402,10 @@ Sends a message through the selected account's SMTP server. It supports:
 
 - To, CC, and BCC recipients.
 - Plain-text or HTML bodies.
-- Attachments from file paths available to the server process. Relative paths use the process working directory; absolute paths are recommended.
+- Attachments from file paths available to the server process (`attachments`). Relative paths use the process working directory; absolute paths are recommended.
+- Attachments carried inside the request as base64 (`inline_attachments`), for
+  clients that do not share the server's filesystem. See
+  [Inline attachments](#inline-attachments).
 - `Reply-To`, `In-Reply-To`, and `References` headers.
 
 The tool is always present in the stable MCP catalog. The selected
@@ -469,8 +472,9 @@ as `utf8-append-unsupported` without changing the successful SMTP outcome.
 
 Composes and saves a draft without SMTP. It requires `draft`, not `append`.
 Pass the account and compose fields (recipients, subject, body, optional CC/BCC,
-attachments and threading headers). An explicit empty recipient list is allowed;
-every supplied recipient must match the recipient allowlist.
+`attachments`, `inline_attachments`, and threading headers). An explicit empty
+recipient list is allowed; every supplied recipient must match the recipient
+allowlist.
 
 This tool has no mailbox or flags parameter. It uses the account's optional
 `drafts_mailbox`, or the unique mailbox advertising special-use `\Drafts`,
@@ -520,6 +524,60 @@ SELECT/APPEND with `utf8-append-unsupported`. A known APPEND success without
 `APPENDUID` returns `email_id: unknown`. A lost APPEND result is instead tagged
 `unknown`; the server does not replay it because that could create a duplicate
 draft.
+
+### Inline attachments
+
+`send_email`, `save_draft`, and `save_to_mailbox` accept an optional
+`inline_attachments` list for files that the MCP client holds but the server
+cannot read, for example when the server runs on another machine. `forward_email`
+does not accept it; a forward re-attaches the source message's own parts. Each
+item has:
+
+| Field            | Required | Rules                                                                                                                                                                                                        |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `filename`       | yes      | Bare name shown to recipients, at most 255 UTF-8 bytes. No `/`, `\`, or `..`; no control characters (CR, LF, NUL, tab), Unicode format characters such as bidirectional overrides, or line separators.       |
+| `content_base64` | yes      | The file bytes as standard RFC 4648 base64 with `=` padding. Whitespace, line breaks, URL-safe characters, and `data:` URL prefixes are rejected rather than normalized. Must decode to at least one byte.   |
+| `mime_type`      | no       | `type/subtype` without parameters, for example `application/pdf`. When omitted or empty it is inferred from the file extension, else `application/octet-stream`. `multipart/*` and `message/*` are rejected. |
+
+Example `save_draft` arguments (the base64 is shortened here):
+
+```json
+{
+  "account_name": "contabilidad",
+  "subject": "Factura 26338",
+  "body": "Adjunto la factura.",
+  "recipients": ["cliente@example.com"],
+  "inline_attachments": [
+    {
+      "filename": "Factura_26338.pdf",
+      "content_base64": "JVBERi0xLjQKJ...",
+      "mime_type": "application/pdf"
+    }
+  ]
+}
+```
+
+`attachments` and `inline_attachments` may be combined. Together they may hold
+at most 20 attachments per message. Inline content may decode to at most 20 MiB
+in total, each file attachment may be at most 25 MiB, and all file plus inline
+attachments together at most 50 MiB. The server checks the base64 length against the budget before
+decoding, then decodes strictly in memory. Inline content is never written to a
+local file and is never logged.
+
+Inline validation runs before account resolution and before any SMTP or IMAP
+connection. Errors start with a stable category, for example
+`invalid_attachment: inline_attachments[0].filename must be a bare file name
+without '/' or '\' path separators` or `attachment_too_large: inline_attachments
+exceed 20971520 decoded bytes in total`. Inline attachments are checked in
+addition to, never instead of, the account's mutation grants (`send`, `draft`,
+or `append`), send capability, and recipient allowlist.
+
+Inline and file attachments share one MIME composition: each becomes a base64
+leaf with `Content-Disposition: attachment` and the original filename, encoded
+with RFC 2231 when it contains non-ASCII characters. A request carrying the full
+inline budget needs about 26.7 MiB of base64, which fits the 32 MiB inbound MCP
+message limit of every transport; see
+[Inbound MCP message size](security.md#inbound-mcp-message-size).
 
 ### `forward_email`
 

@@ -20,9 +20,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiosmtplib.email import flatten_message
 
+from mcp_email_server.adapters.mutations import ClassicMutationProvider
 from mcp_email_server.application.limits import APPLICATION_LIMITS
+from mcp_email_server.application.mutations import (
+    AppendMutationOutcome,
+    AttachmentTooLargeError,
+    InlineAttachment,
+    MutationAccountSnapshot,
+    MutationProviderAccess,
+    MutationServices,
+    SaveDraftCommand,
+    prepare_inline_attachments,
+)
 from mcp_email_server.config import EmailServer
 from mcp_email_server.emails.classic import (
+    ClassicEmailHandler,
     EmailClient,
     _as_modern_smtp_message,
     _format_forwarded_text,
@@ -1710,3 +1722,186 @@ class TestForwardEightBitTransport:
 
         assert [item.status for item in outcome.outcomes] == ["succeeded"]
         smtp.data.assert_awaited_once()
+
+
+# --- Inline (base64) attachments share the file attachment MIME composition ------
+
+_INVOICE_PDF = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+
+
+def _inline_pdf(filename: str = "Factura_26338.pdf", mime_type: str | None = "application/pdf") -> InlineAttachment:
+    return InlineAttachment(
+        filename=filename,
+        content_base64=base64.b64encode(_INVOICE_PDF).decode("ascii"),
+        mime_type=mime_type,
+    )
+
+
+def _attachment_parts(message) -> list:
+    parsed = BytesParser(policy=default).parsebytes(_serialize_message_for_imap_append(message))
+    return [part for part in parsed.walk() if part.get_content_disposition() == "attachment"]
+
+
+@pytest.mark.asyncio
+async def test_save_draft_with_inline_pdf_composes_mime_with_the_attached_invoice(email_settings) -> None:
+    handler = ClassicEmailHandler(email_settings)
+    captured: dict[str, object] = {}
+
+    async def append(message, incoming, mailbox, flags):
+        captured.update(message=message, mailbox=mailbox, flags=flags)
+        return AppendMutationOutcome("succeeded", message["Message-Id"], uid="7", mailbox=mailbox)
+
+    handler.incoming_client.append_to_mailbox_with_outcome = append
+    provider = ClassicMutationProvider(handler)
+    account = MutationAccountSnapshot(
+        account_name="contabilidad",
+        mode="managed",
+        allowed_senders=(),
+        allowed_recipients=(),
+        report_blocked_mutations=False,
+        can_send=True,
+        drafts_mailbox="Drafts",
+    )
+    authority = MagicMock()
+    authority.resolve.return_value = account
+    factory = MagicMock()
+    factory.open.return_value = MutationProviderAccess(account, provider)
+    projections = MagicMock()
+    projections.open = AsyncMock(return_value=MagicMock(invalidate=AsyncMock()))
+    services = MutationServices.compose(authority, factory, projections)
+
+    outcome = await services.save_draft.execute(
+        SaveDraftCommand(
+            "contabilidad",
+            (),
+            "Factura 26338",
+            "Adjunto la factura.",
+            inline_attachments=(_inline_pdf(),),
+        )
+    )
+
+    assert outcome.status == "succeeded"
+    assert captured["mailbox"] == "Drafts"
+    assert captured["flags"] == r"(\Draft)"
+    [part] = _attachment_parts(captured["message"])
+    assert part.get_content_type() == "application/pdf"
+    assert part.get_filename() == "Factura_26338.pdf"
+    assert part["Content-Transfer-Encoding"] == "base64"
+    assert part.get_payload(decode=True) == _INVOICE_PDF
+
+
+def test_inline_and_file_attachments_use_the_same_mime_part_shape(email_client, tmp_path) -> None:
+    report = tmp_path / "Factura_26338.pdf"
+    report.write_bytes(_INVOICE_PDF)
+    [inline] = prepare_inline_attachments((_inline_pdf(),))
+
+    message = email_client.compose_message(
+        ["cliente@example.com"],
+        "Factura",
+        "body",
+        attachments=[str(report)],
+        inline_attachments=[inline],
+    )
+
+    file_part, inline_part = _attachment_parts(message)
+    assert file_part.items() == inline_part.items()
+    assert file_part.get_payload(decode=True) == inline_part.get_payload(decode=True) == _INVOICE_PDF
+
+
+def test_non_ascii_inline_filename_uses_rfc2231_like_file_attachments(email_client, tmp_path) -> None:
+    name = "Factura_ñ_2026.pdf"
+    local = tmp_path / name
+    local.write_bytes(_INVOICE_PDF)
+    [inline] = prepare_inline_attachments((_inline_pdf(name),))
+
+    message = email_client.compose_message(
+        ["cliente@example.com"], "Factura", "body", attachments=[str(local)], inline_attachments=[inline]
+    )
+
+    raw = _serialize_message_for_imap_append(message)
+    assert raw.count(b"filename*=utf-8''Factura_%C3%B1_2026.pdf") == 2
+    assert [part.get_filename() for part in _attachment_parts(message)] == [name, name]
+
+
+def test_inline_attachment_without_mime_type_is_inferred_from_its_extension(email_client) -> None:
+    prepared = prepare_inline_attachments((_inline_pdf(mime_type=None), _inline_pdf("datos.bin.zzz", None)))
+
+    message = email_client.compose_message(
+        ["cliente@example.com"], "Factura", "body", inline_attachments=list(prepared)
+    )
+
+    assert [part.get_content_type() for part in _attachment_parts(message)] == [
+        "application/pdf",
+        "application/octet-stream",
+    ]
+
+
+def test_inline_bytes_share_the_compose_time_total_attachment_limit(email_client, tmp_path) -> None:
+    local = tmp_path / "local.bin"
+    local.write_bytes(b"1234")
+    [inline] = prepare_inline_attachments((InlineAttachment("inline.bin", base64.b64encode(b"5678").decode(), None),))
+
+    with (
+        patch("mcp_email_server.emails.classic.MAX_TOTAL_ATTACHMENT_BYTES", 7),
+        pytest.raises(AttachmentTooLargeError, match="attachments exceed 7 bytes in total"),
+    ):
+        email_client.compose_message(
+            ["cliente@example.com"], "Subject", "body", attachments=[str(local)], inline_attachments=[inline]
+        )
+
+
+def test_inline_composition_never_touches_the_filesystem_or_logs_content(email_client, monkeypatch) -> None:
+    import builtins
+    import io
+    import os
+
+    from mcp_email_server.log import logger
+
+    [inline] = prepare_inline_attachments((_inline_pdf(),))
+    encoded = base64.b64encode(_INVOICE_PDF).decode("ascii")
+    sink = io.StringIO()
+    sink_id = logger.add(sink, format="{message}", level="DEBUG")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inline attachment composition must not open files")
+
+    monkeypatch.setattr(builtins, "open", forbidden)
+    monkeypatch.setattr(os, "open", forbidden)
+    try:
+        message = email_client.compose_message(["cliente@example.com"], "Factura", "body", inline_attachments=[inline])
+    finally:
+        monkeypatch.undo()
+        logger.remove(sink_id)
+
+    assert _attachment_parts(message)[0].get_payload(decode=True) == _INVOICE_PDF
+    logged = sink.getvalue()
+    assert "Factura_26338.pdf" in logged
+    assert encoded not in logged
+    assert encoded[:24] not in logged
+    assert "%PDF" not in logged
+
+
+@pytest.mark.asyncio
+async def test_send_email_with_outcome_submits_inline_attachment_in_the_data_phase(email_client) -> None:
+    smtp = AsyncMock()
+    smtp.__aenter__ = AsyncMock(return_value=smtp)
+    smtp.__aexit__ = AsyncMock(return_value=None)
+    smtp.supports_extension = MagicMock(return_value=False)
+    [inline] = prepare_inline_attachments((_inline_pdf(),))
+
+    with patch("mcp_email_server.emails.classic.aiosmtplib.SMTP", return_value=smtp):
+        outcome = await email_client.send_email_with_outcome(
+            ["cliente@example.com"], "Factura", "Adjunta", inline_attachments=[inline]
+        )
+
+    assert [item.status for item in outcome.outcomes] == ["succeeded"]
+    data = smtp.data.await_args.args[0]
+    [part] = [
+        part
+        for part in BytesParser(policy=default).parsebytes(data).walk()
+        if part.get_content_disposition() == "attachment"
+    ]
+    assert part.get_filename() == "Factura_26338.pdf"
+    assert part.get_payload(decode=True) == _INVOICE_PDF
+    # Base64 keeps the message 7-bit clean, so no 8BITMIME parameter is required.
+    assert "BODY=8BITMIME" not in smtp.mail.await_args.kwargs.get("options", [])

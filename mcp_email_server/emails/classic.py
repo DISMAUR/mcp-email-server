@@ -49,12 +49,16 @@ from mcp_email_server.application.metadata import (
 from mcp_email_server.application.mutations import (
     MUTABLE_EMAIL_FLAGS,
     AppendMutationOutcome,
+    AttachmentError,
+    AttachmentNotFoundError,
+    AttachmentTooLargeError,
     BatchMutationOutcome,
     DeliveryMutationOutcome,
     FlagOperation,
     MailboxCreationStatus,
     MutableEmailFlag,
     MutationStatus,
+    PreparedInlineAttachment,
     SentCopyMutationOutcome,
     TargetMutationOutcome,
     normalize_thread_message_ids,
@@ -2499,33 +2503,47 @@ class EmailClient:
         if not path.exists():
             msg = f"Attachment file not found: {file_path}"
             logger.error(msg)
-            raise FileNotFoundError(msg)
+            raise AttachmentNotFoundError(msg)
 
         if not path.is_file():
             msg = f"Attachment path is not a file: {file_path}"
             logger.error(msg)
-            raise ValueError(msg)
+            raise AttachmentError(msg)
 
         return path
 
     def _read_attachment(self, path: Path) -> bytes:
         """Read one attachment without allowing a preflight-to-read size race."""
-        with path.open("rb") as source:
-            file_data = source.read(MAX_ATTACHMENT_BYTES + 1)
+        try:
+            with path.open("rb") as source:
+                file_data = source.read(MAX_ATTACHMENT_BYTES + 1)
+        except FileNotFoundError:
+            raise AttachmentNotFoundError(f"Attachment file not found: {path}") from None
+        except OSError as error:
+            raise AttachmentError(f"Attachment file could not be read: {path} ({type(error).__name__})") from None
         if len(file_data) > MAX_ATTACHMENT_BYTES:
-            raise ValueError(f"an attachment exceeds {MAX_ATTACHMENT_BYTES} bytes")
+            raise AttachmentTooLargeError(f"an attachment exceeds {MAX_ATTACHMENT_BYTES} bytes")
         return file_data
 
     @staticmethod
     def _validate_total_attachment_bytes(total_bytes: int) -> None:
         if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES:
-            raise ValueError(f"attachments exceed {MAX_TOTAL_ATTACHMENT_BYTES} bytes in total")
+            raise AttachmentTooLargeError(f"attachments exceed {MAX_TOTAL_ATTACHMENT_BYTES} bytes in total")
 
     def _create_attachment_part(self, path: Path, file_data: bytes) -> MIMEBase:
-        """Create a MIME attachment part from already bounded bytes."""
+        """Create a MIME attachment part for a server-side file from already bounded bytes."""
         mime_type, _ = mimetypes.guess_type(str(path))
         if mime_type is None:
             mime_type = "application/octet-stream"
+        return self._create_named_attachment_part(path.name, mime_type, file_data)
+
+    @staticmethod
+    def _create_named_attachment_part(filename: str, mime_type: str, file_data: bytes) -> MIMEBase:
+        """Build the one MIME attachment shape shared by file and inline attachments.
+
+        The ``filename`` parameter is RFC 2231-encoded by the email package when
+        it contains non-ASCII characters.
+        """
         main_type, sub_type = mime_type.split("/", 1)
 
         attachment_part = MIMEBase(main_type, sub_type)
@@ -2534,9 +2552,9 @@ class EmailClient:
         attachment_part.add_header(
             "Content-Disposition",
             "attachment",
-            filename=path.name,
+            filename=filename,
         )
-        logger.info(f"Attached file: {path.name} ({mime_type})")
+        logger.info(f"Attached file: {filename} ({mime_type})")
         return attachment_part
 
     def _create_message_with_attachments(
@@ -2545,8 +2563,9 @@ class EmailClient:
         html: bool,
         attachments: list[str] | None,
         extra_parts: list[Message] | None = None,
+        inline_attachments: Sequence[PreparedInlineAttachment] | None = None,
     ) -> MIMEMultipart:
-        """Create multipart message with attachments and already-built MIME parts."""
+        """Create multipart message with file, inline, and already-built MIME parts."""
         msg = MIMEMultipart()
         content_type = "html" if html else "plain"
         text_part = MIMEText(body, content_type, "utf-8")
@@ -2564,6 +2583,14 @@ class EmailClient:
             except Exception as e:
                 logger.error(f"Failed to attach file {file_path}: {e}")
                 raise
+
+        # Inline attachments were validated and decoded by the application layer;
+        # they share the file attachments' size budget and MIME shape. Their bytes
+        # are never written to disk or logged.
+        for item in inline_attachments or ():
+            total_attachment_bytes += len(item.content)
+            self._validate_total_attachment_bytes(total_attachment_bytes)
+            msg.attach(self._create_named_attachment_part(item.filename, item.mime_type, item.content))
 
         # Forwarded parts arrive already bounded by the source-read size limit and
         # already normalized for re-attachment, so they are attached verbatim after
@@ -2597,6 +2624,7 @@ class EmailClient:
         reply_to: str | None = None,
         *,
         extra_parts: list[Message] | None = None,
+        inline_attachments: Sequence[PreparedInlineAttachment] | None = None,
     ) -> MIMEText | MIMEMultipart:
         """Compose an email message without sending it.
 
@@ -2612,11 +2640,15 @@ class EmailClient:
         ``extra_parts`` carries already-built MIME parts (a forward's re-attached
         source parts) into the same multipart container as file attachments. It is
         keyword-only so existing positional call sites keep their meaning.
+        ``inline_attachments`` carries validated in-memory attachments composed
+        exactly like file attachments.
         """
         envelope_sender = self.envelope_sender
 
-        if attachments or extra_parts:
-            msg = self._create_message_with_attachments(body, html, attachments, extra_parts)
+        if attachments or extra_parts or inline_attachments:
+            msg = self._create_message_with_attachments(
+                body, html, attachments, extra_parts, inline_attachments=inline_attachments
+            )
         else:
             content_type = "html" if html else "plain"
             msg = MIMEText(body, content_type, "utf-8")
@@ -2684,6 +2716,7 @@ class EmailClient:
         reply_to: str | None = None,
         *,
         extra_parts: list[Message] | None = None,
+        inline_attachments: Sequence[PreparedInlineAttachment] | None = None,
     ) -> DeliveryMutationOutcome:
         """Run one SMTP transaction and preserve phase-specific delivery evidence."""
         msg = self.compose_message(
@@ -2699,6 +2732,7 @@ class EmailClient:
             False,
             reply_to,
             extra_parts=extra_parts,
+            inline_attachments=inline_attachments,
         )
         all_recipients = [*recipients, *(cc or []), *(bcc or [])]
         envelope_recipients = [email.utils.parseaddr(recipient)[1] for recipient in all_recipients]

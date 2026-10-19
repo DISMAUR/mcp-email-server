@@ -863,8 +863,47 @@
         },
         {
             "name": "send_email",
-            "description": "Send one email using the specified account. Supports reply threading. Partial or ambiguous SMTP delivery reports per-recipient succeeded/failed/unknown status and reports the independent Sent-copy outcome separately; ambiguous effects are not retried automatically. The response names the delivered message's RFC Message-Id once the provider accepts the message data, and reports no identifier for an ambiguous delivery.",
+            "description": "Send one email using the specified account. Supports reply threading. Attach server-side files with attachments or send file bytes as base64 with inline_attachments. Partial or ambiguous SMTP delivery reports per-recipient succeeded/failed/unknown status and reports the independent Sent-copy outcome separately; ambiguous effects are not retried automatically. The response names the delivered message's RFC Message-Id once the provider accepts the message data, and reports no identifier for an ambiguous delivery.",
             "inputSchema": {
+                "$defs": {
+                    "InlineAttachmentInput": {
+                        "additionalProperties": false,
+                        "description": "One attachment sent inside the request, for clients without access to the server's filesystem.",
+                        "properties": {
+                            "filename": {
+                                "description": "Bare file name shown to recipients, for example 'Factura_26338.pdf'. No path separators, '..', or control characters.",
+                                "maxLength": 255,
+                                "minLength": 1,
+                                "title": "Filename",
+                                "type": "string"
+                            },
+                            "content_base64": {
+                                "description": "The file bytes as standard RFC 4648 base64 with '=' padding, without whitespace, line breaks, or a data: URL prefix.",
+                                "maxLength": 27962028,
+                                "minLength": 1,
+                                "title": "Content Base64",
+                                "type": "string"
+                            },
+                            "mime_type": {
+                                "anyOf": [
+                                    {
+                                        "maxLength": 255,
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "description": "Optional media type such as 'application/pdf' (type/subtype, no parameters). When omitted it is inferred from the file extension, else application/octet-stream.",
+                                "title": "Mime Type"
+                            }
+                        },
+                        "required": ["filename", "content_base64"],
+                        "title": "InlineAttachmentInput",
+                        "type": "object"
+                    }
+                },
                 "properties": {
                     "account_name": {
                         "description": "The name of the email account to send from.",
@@ -954,6 +993,23 @@
                         "default": null,
                         "description": "A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
                         "title": "Attachments"
+                    },
+                    "inline_attachments": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/$defs/InlineAttachmentInput"
+                                },
+                                "maxItems": 20,
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Attachments carried inside the request as base64, for files the client holds but the server cannot read. May be combined with attachments: at most 20 attachments in total and at most 20 MiB of decoded inline content per message.",
+                        "title": "Inline Attachments"
                     },
                     "in_reply_to": {
                         "anyOf": [
@@ -1132,6 +1188,45 @@
             "name": "save_to_mailbox",
             "description": "Compose an email and save it to an IMAP folder (e.g., Drafts). Shares recipient, body, attachment, and threading parameters with send_email; adds mailbox and flags, and does not support reply_to. Default folder is Drafts with \\Draft and \\Seen flags. Pure IMAP operation — works without SMTP configuration. An ambiguous APPEND is reported as unknown and is not retried automatically.",
             "inputSchema": {
+                "$defs": {
+                    "InlineAttachmentInput": {
+                        "additionalProperties": false,
+                        "description": "One attachment sent inside the request, for clients without access to the server's filesystem.",
+                        "properties": {
+                            "filename": {
+                                "description": "Bare file name shown to recipients, for example 'Factura_26338.pdf'. No path separators, '..', or control characters.",
+                                "maxLength": 255,
+                                "minLength": 1,
+                                "title": "Filename",
+                                "type": "string"
+                            },
+                            "content_base64": {
+                                "description": "The file bytes as standard RFC 4648 base64 with '=' padding, without whitespace, line breaks, or a data: URL prefix.",
+                                "maxLength": 27962028,
+                                "minLength": 1,
+                                "title": "Content Base64",
+                                "type": "string"
+                            },
+                            "mime_type": {
+                                "anyOf": [
+                                    {
+                                        "maxLength": 255,
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "description": "Optional media type such as 'application/pdf' (type/subtype, no parameters). When omitted it is inferred from the file extension, else application/octet-stream.",
+                                "title": "Mime Type"
+                            }
+                        },
+                        "required": ["filename", "content_base64"],
+                        "title": "InlineAttachmentInput",
+                        "type": "object"
+                    }
+                },
                 "properties": {
                     "account_name": {
                         "description": "The name of the email account.",
@@ -1229,6 +1324,23 @@
                         "description": "A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
                         "title": "Attachments"
                     },
+                    "inline_attachments": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/$defs/InlineAttachmentInput"
+                                },
+                                "maxItems": 20,
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Attachments carried inside the request as base64, for files the client holds but the server cannot read. May be combined with attachments: at most 20 attachments in total and at most 20 MiB of decoded inline content per message.",
+                        "title": "Inline Attachments"
+                    },
                     "in_reply_to": {
                         "anyOf": [
                             {
@@ -1300,8 +1412,47 @@
         },
         {
             "name": "save_draft",
-            "description": "Compose and save an unsent draft to the configured drafts mailbox or unique special-use Drafts mailbox. Requires draft permission, not append or send. Recipients may be omitted; supplied recipients obey the recipient allowlist. The Draft flag is fixed; no arbitrary target or flags.",
+            "description": "Compose and save an unsent draft to the configured drafts mailbox or unique special-use Drafts mailbox. Requires draft permission, not append or send. Recipients may be omitted; supplied recipients obey the recipient allowlist. Attach server-side files with attachments or file bytes as base64 with inline_attachments. The Draft flag is fixed; no arbitrary target or flags.",
             "inputSchema": {
+                "$defs": {
+                    "InlineAttachmentInput": {
+                        "additionalProperties": false,
+                        "description": "One attachment sent inside the request, for clients without access to the server's filesystem.",
+                        "properties": {
+                            "filename": {
+                                "description": "Bare file name shown to recipients, for example 'Factura_26338.pdf'. No path separators, '..', or control characters.",
+                                "maxLength": 255,
+                                "minLength": 1,
+                                "title": "Filename",
+                                "type": "string"
+                            },
+                            "content_base64": {
+                                "description": "The file bytes as standard RFC 4648 base64 with '=' padding, without whitespace, line breaks, or a data: URL prefix.",
+                                "maxLength": 27962028,
+                                "minLength": 1,
+                                "title": "Content Base64",
+                                "type": "string"
+                            },
+                            "mime_type": {
+                                "anyOf": [
+                                    {
+                                        "maxLength": 255,
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "default": null,
+                                "description": "Optional media type such as 'application/pdf' (type/subtype, no parameters). When omitted it is inferred from the file extension, else application/octet-stream.",
+                                "title": "Mime Type"
+                            }
+                        },
+                        "required": ["filename", "content_base64"],
+                        "title": "InlineAttachmentInput",
+                        "type": "object"
+                    }
+                },
                 "properties": {
                     "account_name": {
                         "description": "The name of the email account.",
@@ -1398,6 +1549,23 @@
                         "default": null,
                         "description": "A list of file paths to attach. Relative paths are resolved against the server process working directory; absolute paths are recommended.",
                         "title": "Attachments"
+                    },
+                    "inline_attachments": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/$defs/InlineAttachmentInput"
+                                },
+                                "maxItems": 20,
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Attachments carried inside the request as base64, for files the client holds but the server cannot read. May be combined with attachments: at most 20 attachments in total and at most 20 MiB of decoded inline content per message.",
+                        "title": "Inline Attachments"
                     },
                     "in_reply_to": {
                         "anyOf": [

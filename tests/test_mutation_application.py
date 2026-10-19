@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -16,13 +17,17 @@ from mcp_email_server.application.limits import APPLICATION_LIMITS
 from mcp_email_server.application.mutations import (
     AppendMutationOutcome,
     ArchiveCommand,
+    AttachmentError,
+    AttachmentTooLargeError,
     BatchMutationOutcome,
     DeleteCommand,
     DeliveryMutationOutcome,
+    DraftAppendCommand,
     FlagOperation,
     ForwardCommand,
     ForwardSource,
     ForwardSourcePart,
+    InlineAttachment,
     MarkReadCommand,
     MoveCommand,
     MutableEmailFlag,
@@ -32,6 +37,7 @@ from mcp_email_server.application.mutations import (
     MutationProviderError,
     MutationServices,
     RecipientPolicyDeniedError,
+    SaveDraftCommand,
     SaveToMailboxCommand,
     SendCommand,
     SendMutationOutcome,
@@ -39,6 +45,8 @@ from mcp_email_server.application.mutations import (
     SetEmailFlagsCommand,
     SetEmailTagsCommand,
     TargetMutationOutcome,
+    inline_attachment_bytes,
+    prepare_inline_attachments,
 )
 from mcp_email_server.emails.classic import ClassicEmailHandler
 from mcp_email_server.imap_keywords import ImapKeywordRegistry, ImapKeywordTag
@@ -1656,3 +1664,285 @@ async def test_authorized_oversized_attachments_fail_before_the_provider_effect(
 
     provider.send.assert_not_awaited()
     provider.save_to_mailbox.assert_not_awaited()
+
+
+# --- Inline (base64) attachments -------------------------------------------------
+
+_PDF_BYTES = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+_PDF_BASE64 = base64.b64encode(_PDF_BYTES).decode("ascii")
+
+
+def _inline(
+    filename: object = "Factura_26338.pdf",
+    content: object = _PDF_BASE64,
+    mime_type: object = "application/pdf",
+) -> InlineAttachment:
+    return InlineAttachment(
+        filename=cast(str, filename),
+        content_base64=cast(str, content),
+        mime_type=cast("str | None", mime_type),
+    )
+
+
+def _inline_compose(workflow: str, *items: InlineAttachment, **fields: object):
+    base: dict[str, object] = {
+        "account_name": "primary",
+        "recipients": ("recipient@example.test",),
+        "subject": "Subject",
+        "body": "body",
+        "inline_attachments": items,
+    }
+    base.update(fields)
+    if workflow == "send":
+        return SendCommand(**base)  # type: ignore[arg-type]
+    if workflow == "draft":
+        return SaveDraftCommand(**base)  # type: ignore[arg-type]
+    return SaveToMailboxCommand(**base)  # type: ignore[arg-type]
+
+
+def _execute(services: MutationServices, command):
+    if isinstance(command, SendCommand):
+        return services.send.execute(command)
+    if isinstance(command, SaveDraftCommand):
+        return services.save_draft.execute(command)
+    return services.save_to_mailbox.execute(command)
+
+
+def test_prepare_inline_attachments_decodes_in_order_and_infers_media_types() -> None:
+    prepared = prepare_inline_attachments((
+        _inline(),
+        _inline("notes.txt", base64.b64encode(b"hola").decode(), None),
+        _inline("blob.unknown-extension", base64.b64encode(b"x").decode(), ""),
+        _inline("forwarded.eml", base64.b64encode(b"From: a@b\r\n\r\nbody").decode(), None),
+        _inline("Factura ñ.PDF", _PDF_BASE64, "Application/PDF"),
+    ))
+
+    assert [(item.filename, item.mime_type, item.content) for item in prepared] == [
+        ("Factura_26338.pdf", "application/pdf", _PDF_BYTES),
+        ("notes.txt", "text/plain", b"hola"),
+        ("blob.unknown-extension", "application/octet-stream", b"x"),
+        # An inferred composite type cannot carry a base64 payload; fall back.
+        ("forwarded.eml", "application/octet-stream", b"From: a@b\r\n\r\nbody"),
+        ("Factura ñ.PDF", "application/pdf", _PDF_BYTES),
+    ]
+    assert _PDF_BASE64 not in repr(_inline())
+    # Neither the base64 text nor the decoded bytes appear in diagnostics.
+    assert repr(_PDF_BYTES) not in repr(prepared[0])
+
+
+@pytest.mark.parametrize(
+    ("item", "message"),
+    [
+        (_inline(content="not base64!"), r"content_base64 is not valid base64"),
+        (_inline(content=_PDF_BASE64[:8] + "\n" + _PDF_BASE64[8:]), r"not valid base64"),
+        (_inline(content=_PDF_BASE64[:8] + " " + _PDF_BASE64[8:]), r"not valid base64"),
+        (_inline(content="-_-_"), r"not valid base64"),
+        (_inline(content="QUI"), r"not valid base64"),
+        (_inline(content="ÄÖÜ="), r"not valid base64"),
+        (_inline(content="data:application/pdf;base64," + _PDF_BASE64), r"without a data: URL prefix"),
+        (_inline(content=""), r"content_base64 must not be empty"),
+        (_inline(content=b"QUJD"), r"content_base64 must be a string"),
+        (_inline(filename="../x"), r"without '/' or '\\' path separators"),
+        (_inline(filename="a/b"), r"path separators"),
+        (_inline(filename="a\\b.pdf"), r"path separators"),
+        (_inline(filename=".."), r"must not be empty or consist only of dots"),
+        (_inline(filename="a..b.pdf"), r"must not contain '\.\.'"),
+        (_inline(filename=""), r"must not be empty"),
+        (_inline(filename="  "), r"must not be empty"),
+        (_inline(filename="bad\r\nname.pdf"), r"control characters \(including CR, LF, or NUL\)"),
+        (_inline(filename="nul\x00.pdf"), r"control characters"),
+        (_inline(filename="tab\t.pdf"), r"control characters"),
+        (_inline(filename="invoice\u202efdp.exe"), r"format characters"),
+        (_inline(filename="line\u2028sep.pdf"), r"line separators"),
+        (_inline(filename="a" * 252 + ".pdf"), r"filename exceeds 255 bytes"),
+        (_inline(filename=7), r"filename must be a string"),
+        (_inline(mime_type="application"), r"media type such as application/pdf"),
+        (_inline(mime_type="application/pdf; charset=utf-8"), r"without parameters"),
+        (_inline(mime_type="text/ plain"), r"media type"),
+        (_inline(mime_type="/pdf"), r"media type"),
+        (_inline(mime_type="application/pdf\r\nX-Injected: 1"), r"media type"),
+        (_inline(mime_type="multipart/mixed"), r"discrete media type"),
+        (_inline(mime_type="message/rfc822"), r"discrete media type"),
+        (_inline(mime_type=42), r"mime_type must be a string or null"),
+    ],
+)
+def test_prepare_inline_attachments_rejects_malformed_items_with_clear_messages(
+    item: InlineAttachment, message: str
+) -> None:
+    with pytest.raises(AttachmentError, match=message) as caught:
+        prepare_inline_attachments((item,))
+
+    assert str(caught.value).startswith("invalid_attachment: inline_attachments[0]")
+    assert isinstance(caught.value, ValueError)
+    if isinstance(item.content_base64, str) and len(item.content_base64) > 4:
+        assert item.content_base64 not in str(caught.value)
+
+
+def test_prepare_inline_attachments_rejects_non_attachment_items() -> None:
+    with pytest.raises(AttachmentError, match=r"inline_attachments\[1\] must provide filename"):
+        prepare_inline_attachments((_inline(), cast(InlineAttachment, {"filename": "x"})))
+
+
+def test_oversized_inline_text_is_rejected_before_it_is_decoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mutations_module, "APPLICATION_LIMITS", replace(APPLICATION_LIMITS, inline_attachment_total_bytes=8)
+    )
+    decoder = MagicMock(side_effect=base64.b64decode)
+    monkeypatch.setattr(mutations_module.base64, "b64decode", decoder)
+
+    with pytest.raises(
+        AttachmentTooLargeError, match=r"^attachment_too_large: inline_attachments\[0\] exceeds 8 decoded"
+    ):
+        prepare_inline_attachments((_inline(content=base64.b64encode(b"x" * 12).decode()),))
+    decoder.assert_not_called()
+
+    with pytest.raises(AttachmentTooLargeError, match=r"inline_attachments exceed 8 decoded bytes in total"):
+        prepare_inline_attachments((
+            _inline(content=base64.b64encode(b"x" * 6).decode()),
+            _inline(content=base64.b64encode(b"y" * 6).decode()),
+        ))
+    # Only the first, in-budget item was decoded; the second failed on its length.
+    assert decoder.call_count == 1
+
+
+def test_inline_budget_rejects_padding_overflow_after_exact_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        mutations_module, "APPLICATION_LIMITS", replace(APPLICATION_LIMITS, inline_attachment_total_bytes=8)
+    )
+
+    # Nine bytes encode to 12 characters, the same length that bounds eight bytes.
+    with pytest.raises(AttachmentTooLargeError, match=r"exceeds 8 decoded bytes"):
+        prepare_inline_attachments((_inline(content=base64.b64encode(b"x" * 9).decode()),))
+    assert prepare_inline_attachments((_inline(content=base64.b64encode(b"x" * 8).decode()),))[0].content == b"x" * 8
+
+
+def test_real_twenty_mebibyte_inline_budget_accepts_the_limit_and_rejects_one_more_byte() -> None:
+    limit = APPLICATION_LIMITS.inline_attachment_total_bytes
+    half = base64.b64encode(b"a" * (limit // 2)).decode()
+
+    accepted = prepare_inline_attachments((_inline("one.bin", half, None), _inline("two.bin", half, None)))
+    assert sum(len(item.content) for item in accepted) == limit
+
+    with pytest.raises(AttachmentTooLargeError, match=f"inline_attachments\\[0\\] exceeds {limit} decoded bytes"):
+        prepare_inline_attachments((_inline("big.bin", base64.b64encode(b"a" * (limit + 1)).decode(), None),))
+    with pytest.raises(AttachmentTooLargeError, match=f"inline_attachments exceed {limit} decoded bytes in total"):
+        prepare_inline_attachments((
+            _inline("one.bin", half, None),
+            _inline("two.bin", half, None),
+            _inline("three.bin", "QQ==", None),
+        ))
+
+
+def test_inline_attachment_bytes_counts_decoded_sizes_without_decoding() -> None:
+    items = tuple(_inline(content=base64.b64encode(b"z" * size).decode()) for size in (1, 2, 3, 4))
+    assert inline_attachment_bytes(items) == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+@pytest.mark.parametrize(
+    "items",
+    [
+        (_inline(content="%%%%"),),
+        (_inline(filename="../x"),),
+        (_inline(filename="a/b"),),
+        (_inline(mime_type="pdf"),),
+        tuple(_inline(f"file{index}.pdf") for index in range(21)),
+    ],
+    ids=["invalid-base64", "traversal", "separator", "mime", "too-many"],
+)
+async def test_invalid_inline_attachments_fail_before_authority_or_provider_access(
+    workflow: str, items: tuple[InlineAttachment, ...]
+) -> None:
+    provider = _send_provider()
+    services, authority, factory, _ = _services(provider=provider)
+
+    with pytest.raises(AttachmentError):
+        await _execute(services, _inline_compose(workflow, *items))
+
+    authority.resolve.assert_not_called()
+    factory.open.assert_not_called()
+    assert provider.mock_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+async def test_inline_and_path_attachments_share_the_twenty_item_limit(workflow: str) -> None:
+    provider = _send_provider()
+    services, authority, factory, _ = _services(provider=provider)
+    command = _inline_compose(
+        workflow,
+        *(_inline(f"inline{index}.pdf") for index in range(6)),
+        attachments=tuple(f"/srv/attachment{index}.pdf" for index in range(15)),
+    )
+
+    with pytest.raises(AttachmentError, match=r"at most 20 attachments are allowed per message .*got 21"):
+        await _execute(services, command)
+
+    authority.resolve.assert_not_called()
+    factory.open.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+async def test_more_than_twenty_mebibytes_inline_fails_before_any_connection(workflow: str) -> None:
+    limit = APPLICATION_LIMITS.inline_attachment_total_bytes
+    oversized = base64.b64encode(b"a" * (limit // 2 + 1)).decode()
+    provider = _send_provider()
+    services, authority, factory, _ = _services(provider=provider)
+
+    with pytest.raises(AttachmentTooLargeError, match="decoded bytes in total"):
+        await _execute(
+            services, _inline_compose(workflow, _inline("a.bin", oversized, None), _inline("b.bin", oversized, None))
+        )
+
+    authority.resolve.assert_not_called()
+    factory.open.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow", ["send", "draft", "save"])
+async def test_inline_bytes_count_toward_the_combined_attachment_total(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workflow: str
+) -> None:
+    attachment = tmp_path / "local.bin"
+    attachment.write_bytes(b"1234")
+    monkeypatch.setattr(mutations_module, "APPLICATION_LIMITS", replace(APPLICATION_LIMITS, total_attachment_bytes=8))
+    provider = _send_provider()
+    services, _, _, _ = _services(account=_account(drafts_mailbox="Drafts"), provider=provider)
+    command = _inline_compose(
+        workflow, _inline(content=base64.b64encode(b"12345").decode()), attachments=(str(attachment),)
+    )
+
+    with pytest.raises(AttachmentTooLargeError, match=r"^attachment_too_large: attachments exceed 8 bytes in total$"):
+        await _execute(services, command)
+
+    provider.send.assert_not_awaited()
+    provider.save_to_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forward_rejects_inline_attachments_before_provider_access() -> None:
+    provider = _forward_provider()
+    services, _, factory, _ = _services(provider=provider)
+
+    with pytest.raises(ValueError, match="does not accept inline attachments"):
+        await services.forward.execute(_forward_command(inline_attachments=(_inline(),)))
+
+    factory.open.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_save_draft_passes_validated_inline_attachments_to_the_draft_append() -> None:
+    provider = _send_provider()
+    services, _, _, _ = _services(account=_account(drafts_mailbox="Drafts"), provider=provider)
+
+    outcome = await services.save_draft.execute(
+        SaveDraftCommand("primary", (), "Factura", "Adjunta", inline_attachments=(_inline(),))
+    )
+
+    assert outcome.status == "succeeded"
+    command = provider.save_to_mailbox.await_args.args[0]
+    assert isinstance(command, DraftAppendCommand)
+    assert command.inline_attachments == (_inline(),)
+    assert command.flags == (r"\Draft",)

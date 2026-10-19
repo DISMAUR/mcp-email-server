@@ -123,8 +123,8 @@ claim.
 `save_draft` is an independent MCP tool sharing the common MIME composition and
 APPEND implementation with `save_to_mailbox` and Sent-copy saving. It requires
 `draft`, not `append` or SMTP capability. Its compose fields allow an explicit
-empty recipient list and optional CC/BCC, subject, body, attachments, and threading
-headers. All supplied recipients require the existing recipient policy; no
+empty recipient list and optional CC/BCC, subject, body, file and inline
+attachments, and threading headers. All supplied recipients require the existing recipient policy; no
 recipients is a valid draft even with an empty allowlist. Attachment preflight
 and reads occur only after account and policy authorization.
 
@@ -182,6 +182,44 @@ aborts the connection and is never replayed automatically.
 Success requires positive APPEND evidence. If APPEND succeeds but UID mapping or
 projection update is unavailable, the result remains success with an unknown
 placement/projection warning rather than resubmitting.
+
+## Inline Attachments
+
+`send_email`, `save_draft`, and `save_to_mailbox` accept optional inline
+attachments in addition to caller-supplied server paths, for clients that do not
+share the server's filesystem. `forward_email` rejects them; its parts come from
+the source message. Each item carries a bare filename, strict base64 content, and
+an optional media type.
+
+Validation is part of request validation, before account resolution, filesystem
+access, and any provider connection:
+
+- the filename is non-empty, at most 255 UTF-8 bytes, contains no `/`, `\`, or
+  `..`, and no control, Unicode format, surrogate, or line/paragraph separator
+  character;
+- content is RFC 4648 base64 with the standard alphabet and padding, decoded with
+  strict validation; whitespace, line breaks, URL-safe characters, and `data:`
+  prefixes are rejected rather than normalized, and empty content is rejected;
+- a supplied media type is one RFC 6838 `type/subtype` without parameters and is
+  not composite (`multipart/*`, `message/*`); an omitted or empty type is inferred
+  from the filename extension, falling back to `application/octet-stream`, and a
+  composite inference also falls back;
+- file and inline attachments together are at most the shared attachment count;
+  inline content decodes to at most `inline_attachment_total_bytes` (20 MiB) in
+  total and each item to at most the per-attachment limit. The encoded length is
+  checked against the remaining budget before decoding so an oversized value
+  never allocates its decoded copy.
+
+Validation failures use the stable `invalid_attachment` or
+`attachment_too_large` category prefix and never echo content. After
+authorization the combined file and inline bytes are bounded by the existing
+total attachment limit before the provider effect, and again at composition.
+Inline attachments are additional input, not an alternative authority path: mutation
+grants, send capability, recipient policy, and fresh revalidation apply unchanged.
+Decoded bytes exist only in memory for composition; they are never persisted,
+written to a local file, or logged. Inline and file attachments share one MIME
+leaf shape: base64 transfer encoding, `Content-Disposition: attachment`, and the
+original filename, RFC 2231-encoded when non-ASCII.
 
 ## Move and Archive
 
@@ -456,6 +494,16 @@ enter public errors.
   expunge. Receive limits precede buffering; revocation before payload blocks it.
   Account coverage invalidation precedes commands and follows effects; final
   invalidation failure cannot replace remote evidence.
+
+- **07-P2:** Inline attachments on send, draft, and general save reject invalid
+  base64 (including whitespace, URL-safe, unpadded, and `data:` forms), unsafe
+  filenames (`../x`, `a/b`, `a\b`, controls, format characters), malformed or
+  composite media types, more than 20 combined attachments, and more than 20 MiB
+  decoded inline content before account resolution or provider access, with
+  oversized text rejected before decoding. Valid items compose into the same MIME
+  leaf shape as file attachments, including RFC 2231 filenames, count toward the
+  combined total, are never written to disk or logged, and never bypass mutation
+  grants, send capability, or recipient policy.
 
 - Each effect maps to the class above, including explicit/implicit mark-read,
   scoped organize fallback, delete, general append, recipientless draft, forward,

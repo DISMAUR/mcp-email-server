@@ -752,6 +752,17 @@ stat, or resolve caller-supplied attachment paths, including UNC or network
 paths. Once those checks pass, attachment size or file-access validation may
 still reject the request after filesystem access.
 
+`inline_attachments` on `send_email`, `save_draft`, and `save_to_mailbox` carry
+file bytes inside the MCP request as strict base64 instead of naming a server
+path, so they never read the server filesystem. Their filename, media type,
+base64 syntax, count, and decoded size are validated before account resolution
+or any provider connection, and the decoded bytes stay in memory for MIME
+composition only: they are not written to disk and neither they nor the base64
+text are logged. Inline attachments add to, and never replace, the mutation
+grant, send-capability, and recipient-allowlist checks. Filenames reject path
+separators, `..`, control characters, and Unicode format characters such as
+bidirectional overrides that could disguise a file extension.
+
 ## TLS certificate verification
 
 Keep `verify_ssl = true` for remote IMAP and SMTP services. Disabling

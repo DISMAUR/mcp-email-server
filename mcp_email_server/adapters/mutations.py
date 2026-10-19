@@ -41,6 +41,7 @@ from mcp_email_server.application.mutations import (
     SetEmailFlagsCommand,
     SetEmailTagsCommand,
     _validate_recipient_policy,
+    prepare_inline_attachments,
 )
 from mcp_email_server.config import EmailSettings, Settings
 from mcp_email_server.emails.classic import ClassicEmailHandler, _validate_flags
@@ -157,6 +158,7 @@ class ClassicMutationProvider:
         account: MutationAccountSnapshot,
     ) -> AppendMutationOutcome:
         self._guard(account, "draft" if isinstance(command, DraftAppendCommand) else "append", command)
+        inline_attachments = prepare_inline_attachments(command.inline_attachments)
         message = self._handler.incoming_client.compose_message(
             list(command.recipients),
             command.subject,
@@ -168,6 +170,7 @@ class ClassicMutationProvider:
             command.in_reply_to,
             command.references,
             include_bcc_header=True,
+            inline_attachments=list(inline_attachments) or None,
         )
         flags = r"(\Draft \Seen)" if command.flags is None else _validate_flags(list(command.flags))
         return await _bounded_mutation_call(
@@ -261,6 +264,7 @@ class ClassicMutationProvider:
         client = self._handler.outgoing_client
         if client is None:
             raise MutationProviderError("capability_unavailable: SMTP is not configured for this account")
+        inline_attachments = prepare_inline_attachments(command.inline_attachments)
         return await _bounded_mutation_call(
             client.send_email_with_outcome(
                 list(command.recipients),
@@ -274,6 +278,7 @@ class ClassicMutationProvider:
                 command.references,
                 reply_to,
                 extra_parts=extra_parts,
+                inline_attachments=list(inline_attachments) or None,
             )
         )
 

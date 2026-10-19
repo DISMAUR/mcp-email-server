@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
+import re
+import unicodedata
 from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, Protocol, TypeVar, cast
+from typing import ClassVar, Literal, Protocol, TypeVar, cast
 
 from mcp_email_server.application.limits import (
     APPLICATION_LIMITS,
+    base64_encoded_length,
     validate_controlled_string,
     validate_imap_uid,
     validate_optional_controlled_string,
@@ -46,6 +51,51 @@ class MutationProjectionError(RuntimeError):
 
 class RecipientPolicyDeniedError(PermissionError):
     """Current account authority denies one or more message recipients."""
+
+
+AttachmentErrorCategory = Literal["invalid_attachment", "attachment_too_large", "attachment_not_found"]
+
+
+class AttachmentError(ValueError):
+    """A caller-supplied attachment is unusable; the message is safe to return to that caller.
+
+    The stable category prefixes the message so clients can tell a malformed
+    request from a size limit or a missing server-side file.
+    """
+
+    category: ClassVar[AttachmentErrorCategory] = "invalid_attachment"
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"{self.category}: {detail}")
+
+
+class AttachmentTooLargeError(AttachmentError):
+    category = "attachment_too_large"
+
+
+class AttachmentNotFoundError(AttachmentError, FileNotFoundError):
+    """A caller-supplied attachment path does not exist; still a ``FileNotFoundError``."""
+
+    category = "attachment_not_found"
+
+
+@dataclass(frozen=True)
+class InlineAttachment:
+    """One attachment carried inside the request as base64 instead of a server path."""
+
+    filename: str
+    content_base64: str = field(repr=False)
+    mime_type: str | None = None
+
+
+@dataclass(frozen=True)
+class PreparedInlineAttachment:
+    """A validated, decoded inline attachment held only in memory for MIME composition."""
+
+    filename: str
+    mime_type: str
+    content: bytes = field(repr=False)
 
 
 async def _bounded_provider_effect(operation: Awaitable[ProviderResultT]) -> ProviderResultT:
@@ -339,6 +389,7 @@ class ComposeCommand:
     attachments: tuple[str, ...] = ()
     in_reply_to: str | None = None
     references: str | None = None
+    inline_attachments: tuple[InlineAttachment, ...] = ()
 
     def validate(self) -> None:
         self._validate_compose()
@@ -346,7 +397,7 @@ class ComposeCommand:
     def _validate_compose(self, *, allow_recipientless: bool = False) -> None:
         _validate_account_name(self.account_name)
         _validate_recipients((*self.recipients, *self.cc, *self.bcc), allow_empty=allow_recipientless)
-        _validate_content(self.subject, self.body, self.attachments)
+        _validate_content(self.subject, self.body, self.attachments, self.inline_attachments)
         _validate_optional_header("in_reply_to", self.in_reply_to)
         _validate_optional_header("references", self.references)
         if self.in_reply_to is not None:
@@ -445,6 +496,8 @@ class ForwardCommand(ComposeCommand):
             raise ValueError("forwarded content is composed as plain text; html is not supported")
         if self.attachments:
             raise ValueError("forward does not accept caller attachments; the source's parts are re-attached")
+        if self.inline_attachments:
+            raise ValueError("forward does not accept inline attachments; the source's parts are re-attached")
 
 
 class MutationAccountAuthority(Protocol):
@@ -597,7 +650,12 @@ def _validate_recipients(recipients: tuple[str, ...], *, allow_empty: bool = Fal
         raise ValueError("each recipient value must contain exactly one email address")
 
 
-def _validate_content(subject: str, body: str, attachments: tuple[str, ...]) -> None:
+def _validate_content(
+    subject: str,
+    body: str,
+    attachments: tuple[str, ...],
+    inline_attachments: tuple[InlineAttachment, ...] = (),
+) -> None:
     if not isinstance(body, str):
         raise ValueError("body must be a string")  # noqa: TRY004 - stable validation contract
     validate_controlled_string(
@@ -608,7 +666,23 @@ def _validate_content(subject: str, body: str, attachments: tuple[str, ...]) -> 
     )
     if len(body.encode("utf-8")) > APPLICATION_LIMITS.body_bytes:
         raise ValueError(f"body exceeds {APPLICATION_LIMITS.body_bytes} bytes")
+    _validate_attachment_count(attachments, inline_attachments)
     _validate_attachment_paths(attachments)
+    # Decoding here proves strict base64 and the decoded budget before account
+    # authority, filesystem access, or any provider connection.
+    prepare_inline_attachments(inline_attachments)
+
+
+def _validate_attachment_count(
+    attachments: tuple[str, ...],
+    inline_attachments: tuple[InlineAttachment, ...],
+) -> None:
+    total = len(attachments) + len(inline_attachments)
+    if total > APPLICATION_LIMITS.attachments:
+        raise AttachmentError(
+            f"at most {APPLICATION_LIMITS.attachments} attachments are allowed per message "
+            f"(attachments plus inline_attachments); got {total}"
+        )
 
 
 def _validate_attachment_paths(attachments: tuple[str, ...]) -> None:
@@ -631,7 +705,7 @@ def _validate_attachment_paths(attachments: tuple[str, ...]) -> None:
         )
 
 
-def _preflight_attachment_sizes(attachments: tuple[str, ...]) -> None:
+def _preflight_attachment_sizes(attachments: tuple[str, ...], *, inline_bytes: int = 0) -> None:
     """Bound attachment sizes from filesystem metadata before a provider effect.
 
     Callers invoke this only after account resolution, send capability, and
@@ -640,7 +714,9 @@ def _preflight_attachment_sizes(attachments: tuple[str, ...]) -> None:
     SMB/WebDAV session for a UNC path the request was never allowed to use.
     """
 
-    total_size = 0
+    total_size = inline_bytes
+    if total_size > APPLICATION_LIMITS.total_attachment_bytes:
+        raise AttachmentTooLargeError(f"attachments exceed {APPLICATION_LIMITS.total_attachment_bytes} bytes in total")
     for raw_path in attachments:
         path = Path(raw_path)
         try:
@@ -652,10 +728,141 @@ def _preflight_attachment_sizes(attachments: tuple[str, ...]) -> None:
             continue
         size = metadata.st_size
         if size > APPLICATION_LIMITS.attachment_bytes:
-            raise ValueError(f"an attachment exceeds {APPLICATION_LIMITS.attachment_bytes} bytes")
+            raise AttachmentTooLargeError(f"an attachment exceeds {APPLICATION_LIMITS.attachment_bytes} bytes")
         total_size += size
         if total_size > APPLICATION_LIMITS.total_attachment_bytes:
-            raise ValueError(f"attachments exceed {APPLICATION_LIMITS.total_attachment_bytes} bytes in total")
+            raise AttachmentTooLargeError(
+                f"attachments exceed {APPLICATION_LIMITS.total_attachment_bytes} bytes in total"
+            )
+
+
+_MIME_RESTRICTED_NAME = r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}"
+_MIME_TYPE = re.compile(rf"{_MIME_RESTRICTED_NAME}/{_MIME_RESTRICTED_NAME}")
+# Composite entities must not be base64-encoded (RFC 2045 section 6.4), so they
+# cannot carry an opaque caller payload.
+_COMPOSITE_MIME_TYPES = frozenset({"multipart", "message"})
+# Controls, format characters (including bidirectional overrides that can spoof
+# a file extension), surrogates, and line or paragraph separators.
+_UNSAFE_FILENAME_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+_DEFAULT_INLINE_MIME_TYPE = "application/octet-stream"
+
+
+def _validate_inline_filename(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise AttachmentError(f"{label}.filename must be a string")
+    if not value.strip(" ."):
+        raise AttachmentError(f"{label}.filename must not be empty or consist only of dots")
+    if "/" in value or "\\" in value:
+        raise AttachmentError(f"{label}.filename must be a bare file name without '/' or '\\' path separators")
+    if ".." in value:
+        raise AttachmentError(f"{label}.filename must not contain '..'")
+    if any(unicodedata.category(character) in _UNSAFE_FILENAME_CATEGORIES for character in value):
+        raise AttachmentError(
+            f"{label}.filename must not contain control characters (including CR, LF, or NUL), "
+            "format characters, or line separators"
+        )
+    if len(value.encode("utf-8")) > APPLICATION_LIMITS.attachment_filename_bytes:
+        raise AttachmentError(f"{label}.filename exceeds {APPLICATION_LIMITS.attachment_filename_bytes} bytes")
+    return value
+
+
+def _inline_mime_type(value: object, filename: str, label: str) -> str:
+    if value is None or value == "":
+        guessed, _encoding = mimetypes.guess_type(filename)
+        if guessed is None:
+            return _DEFAULT_INLINE_MIME_TYPE
+        guessed = guessed.lower()
+        if _MIME_TYPE.fullmatch(guessed) is None or guessed.split("/", 1)[0] in _COMPOSITE_MIME_TYPES:
+            return _DEFAULT_INLINE_MIME_TYPE
+        return guessed
+    if not isinstance(value, str):
+        raise AttachmentError(f"{label}.mime_type must be a string or null")
+    if (
+        len(value.encode("utf-8")) > APPLICATION_LIMITS.attachment_mime_type_bytes
+        or _MIME_TYPE.fullmatch(value) is None
+    ):
+        raise AttachmentError(
+            f"{label}.mime_type must be a media type such as application/pdf (type/subtype without parameters)"
+        )
+    normalized = value.lower()
+    if normalized.split("/", 1)[0] in _COMPOSITE_MIME_TYPES:
+        raise AttachmentError(
+            f"{label}.mime_type must be a discrete media type; multipart/* and message/* are not allowed"
+        )
+    return normalized
+
+
+def _decode_inline_content(value: object, label: str, *, maximum_bytes: int, total_bytes: int) -> bytes:
+    if not isinstance(value, str):
+        raise AttachmentError(f"{label}.content_base64 must be a string")
+    # Bound the encoded text before decoding so an oversized value never
+    # allocates its decoded copy.
+    if len(value) > base64_encoded_length(maximum_bytes):
+        raise AttachmentTooLargeError(f"{label} exceeds {maximum_bytes} decoded bytes")
+    if len(value) > base64_encoded_length(total_bytes):
+        raise AttachmentTooLargeError(
+            f"inline_attachments exceed {APPLICATION_LIMITS.inline_attachment_total_bytes} decoded bytes in total"
+        )
+    if value[:5].lower() == "data:":
+        raise AttachmentError(f"{label}.content_base64 must be bare base64 without a data: URL prefix")
+    try:
+        content = base64.b64decode(value, validate=True)
+    except ValueError:
+        # binascii.Error and non-ASCII input are both ValueError. Never echo the value.
+        raise AttachmentError(
+            f"{label}.content_base64 is not valid base64: use the standard RFC 4648 alphabet with '=' padding "
+            "and no whitespace, line breaks, or URL-safe characters"
+        ) from None
+    if not content:
+        raise AttachmentError(f"{label}.content_base64 must not be empty")
+    if len(content) > maximum_bytes:
+        raise AttachmentTooLargeError(f"{label} exceeds {maximum_bytes} decoded bytes")
+    if len(content) > total_bytes:
+        raise AttachmentTooLargeError(
+            f"inline_attachments exceed {APPLICATION_LIMITS.inline_attachment_total_bytes} decoded bytes in total"
+        )
+    return content
+
+
+def prepare_inline_attachments(
+    attachments: tuple[InlineAttachment, ...],
+) -> tuple[PreparedInlineAttachment, ...]:
+    """Validate and decode inline attachments in memory, in caller order.
+
+    No filesystem, provider, or logging effect happens here; the decoded bytes
+    exist only for MIME composition by the caller.
+    """
+
+    if len(attachments) > APPLICATION_LIMITS.attachments:
+        raise AttachmentError(f"inline_attachments must contain at most {APPLICATION_LIMITS.attachments} items")
+    per_attachment_bytes = min(APPLICATION_LIMITS.attachment_bytes, APPLICATION_LIMITS.inline_attachment_total_bytes)
+    remaining_bytes = APPLICATION_LIMITS.inline_attachment_total_bytes
+    prepared: list[PreparedInlineAttachment] = []
+    for index, item in enumerate(attachments):
+        label = f"inline_attachments[{index}]"
+        if not isinstance(item, InlineAttachment):
+            raise AttachmentError(f"{label} must provide filename, content_base64, and optional mime_type")
+        filename = _validate_inline_filename(item.filename, label)
+        mime_type = _inline_mime_type(item.mime_type, filename, label)
+        content = _decode_inline_content(
+            item.content_base64,
+            label,
+            maximum_bytes=per_attachment_bytes,
+            total_bytes=remaining_bytes,
+        )
+        remaining_bytes -= len(content)
+        prepared.append(PreparedInlineAttachment(filename=filename, mime_type=mime_type, content=content))
+    return tuple(prepared)
+
+
+def inline_attachment_bytes(attachments: tuple[InlineAttachment, ...]) -> int:
+    """Return decoded inline sizes from already validated strict base64 without decoding again."""
+
+    return sum(
+        len(item.content_base64) // 4 * 3 - item.content_base64[-2:].count("=")
+        for item in attachments
+        if isinstance(item, InlineAttachment)
+    )
 
 
 def _forwarded_subject(subject: str) -> str:
@@ -1101,7 +1308,9 @@ class SaveToMailboxService(_MutationWorkflow):
         access = self._open(account)
         require_append_permissions(access.account.allowed_mutations, command.flags)
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
+        _preflight_attachment_sizes(
+            command.attachments, inline_bytes=inline_attachment_bytes(command.inline_attachments)
+        )
         try:
             outcome = _validate_append_result(
                 await _bounded_provider_effect(access.provider.save_to_mailbox(command, access.account))
@@ -1149,7 +1358,9 @@ class SaveDraftService(_MutationWorkflow):
         if access.account.drafts_mailbox != account.drafts_mailbox:
             raise PermissionError("Draft mailbox authority changed; retry")
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
+        _preflight_attachment_sizes(
+            command.attachments, inline_bytes=inline_attachment_bytes(command.inline_attachments)
+        )
         append = DraftAppendCommand(**vars(command), mailbox=mailbox, flags=(r"\Draft",))
         try:
             outcome = _validate_append_result(
@@ -1332,7 +1543,9 @@ class SendService(_MutationWorkflow):
         require_mutation(access.account.allowed_mutations, "send")
         self._require_send_capability(access.account)
         _validate_recipient_policy(command, access.account)
-        _preflight_attachment_sizes(command.attachments)
+        _preflight_attachment_sizes(
+            command.attachments, inline_bytes=inline_attachment_bytes(command.inline_attachments)
+        )
         try:
             delivery = _validate_delivery_result(
                 await _bounded_provider_effect(access.provider.send(command, access.account))

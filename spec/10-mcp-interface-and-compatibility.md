@@ -19,6 +19,13 @@ disappear when mode, account, policy, or provider capability makes a call
 unavailable. Instead, the application service checks current authority at call
 time and returns a bounded typed denial.
 
+`send_email`, `save_draft`, and `save_to_mailbox` additively expose optional
+`inline_attachments`: at most 20 strict objects with `filename`,
+`content_base64`, and optional `mime_type`, bounded by the centralized filename,
+media-type, and encoded inline-budget limits. Existing `attachments` paths keep
+their schema and meaning; `forward_email` does not gain the field. Spec 07 owns
+validation and composition.
+
 `save_draft` is an independent tool, not a visibility-dependent alias for
 `save_to_mailbox`. Its schema exposes compose fields but no mailbox or flags;
 its destination and mutation authority are owned by specs 04 and 07. The complete
@@ -269,6 +276,12 @@ plane.
   literal blocks agree between JSON text and structured content; isError is
   false only for completed sequences. Help documents syntax and limits, not a
   promise of universal server extension support.
+
+- **10-P2:** The catalog snapshot locks the additive strict `inline_attachments`
+  schema on `send_email`, `save_draft`, and `save_to_mailbox`, its absence from
+  `forward_email`, and unchanged `attachments` paths. Raw JSON arguments validate
+  through the published schema, unknown item keys are rejected, and inbound
+  stdio frames and HTTP request bodies accept messages up to the 32 MiB bound.
 
 1. A complete exact catalog snapshot covers names, descriptions, input/output
    schemas, annotations, resources, visibility, and result shapes.
