@@ -182,6 +182,11 @@ def _configure_http_transport(host: str, port: int) -> None:
     mcp.settings.host = host
     mcp.settings.port = port
     mcp.settings.transport_security = _build_transport_security_settings(host, port)
+    # MCP SDK releases that bound request bodies default to 4 MiB, below one
+    # request carrying the inline-attachment budget. Older supported releases
+    # have no such setting and do not bound the body themselves.
+    if "max_request_body_size" in type(mcp.settings).model_fields:
+        mcp.settings.max_request_body_size = APPLICATION_LIMITS.mcp_http_request_body_bytes
 
 
 def _json_requested() -> bool:

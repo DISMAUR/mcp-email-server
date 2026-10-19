@@ -1,6 +1,7 @@
 import pytest
 
 from mcp_email_server.app import mcp
+from mcp_email_server.application.limits import APPLICATION_LIMITS
 from mcp_email_server.cli import (
     WILDCARD_IPV4_BIND_HOST,
     _build_transport_security_settings,
@@ -118,6 +119,7 @@ def test_configure_http_transport_updates_mcp_settings(monkeypatch):
     original_host = mcp.settings.host
     original_port = mcp.settings.port
     original_transport_security = mcp.settings.transport_security
+    original_body_limit = mcp.settings.max_request_body_size
 
     try:
         _configure_http_transport(WILDCARD_IPV4_BIND_HOST, 9557)
@@ -126,7 +128,9 @@ def test_configure_http_transport_updates_mcp_settings(monkeypatch):
         assert mcp.settings.port == 9557
         assert mcp.settings.transport_security.allowed_hosts == ["mcp-email-server:*"]
         assert mcp.settings.transport_security.allowed_origins == ["http://mcp-email-server:*"]
+        assert mcp.settings.max_request_body_size == APPLICATION_LIMITS.mcp_http_request_body_bytes
     finally:
         mcp.settings.host = original_host
         mcp.settings.port = original_port
         mcp.settings.transport_security = original_transport_security
+        mcp.settings.max_request_body_size = original_body_limit

@@ -114,7 +114,7 @@ not delivery to an inbox.
   512 KiB received command-response bytes per connection and 4,096 IMAP response
   blocks. Canonical protocol results are capped at 3 MiB, reserving room under
   the 8 MiB MCP envelope for both representations;
-  the existing 2 MiB stdio input-frame limit still applies. Use focused content
+  the 32 MiB inbound MCP message limit still applies. Use focused content
   and attachment tools for larger transfers.
 - Commands stop on the first failure, timeout, cancellation or limit; no rollback
   or compensation occurs. Cleanup closes the connection without implicit CLOSE

@@ -776,6 +776,23 @@ verify_ssl = false
 Limit this exception to the specific local connection. See
 [ProtonMail Bridge and self-signed TLS](guides.md#protonmail-bridge-and-self-signed-tls).
 
+## Inbound MCP message size
+
+Every transport bounds one inbound MCP message at 32 MiB: stdio frames are
+rejected above that size before JSON parsing, and SSE and Streamable HTTP request
+bodies above it receive HTTP 413 before session handling. The ceiling was raised
+from 2 MiB (stdio) and the MCP SDK's 4 MiB HTTP default so that one
+`send_email`, `save_draft`, or `save_to_mailbox` request can carry the 20 MiB
+decoded `inline_attachments` budget as base64 (about 26.7 MiB) plus its JSON
+framing, body, and headers. It is still a fixed, bounded value: a single
+request can make the server buffer at most this much input, plus the bounded
+decoded copy and MIME serialization of the attachments while composing. Other
+limits are unchanged; in particular, the 8 MiB serialized-result ceiling still
+bounds every response, including `get_attachment_content`.
+
+Inline attachment content is decoded in memory only. It is never written to a
+local file, and neither the base64 text nor the decoded bytes are logged.
+
 ## HTTP transport security
 
 SSE and Streamable HTTP validate `Host` and `Origin` headers by default to

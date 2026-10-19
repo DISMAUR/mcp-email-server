@@ -86,7 +86,7 @@ Bound batches to 20 commands, command text to 64 KiB in total, input message dat
 to 1 MiB in total, received command responses to 512 KiB per connection, and
 IMAP response blocks to 4,096. Canonical protocol results are capped at 3 MiB to
 leave room for both MCP representations and escaping under the 8 MiB final result
-boundary. Reuse the 2 MiB stdio frame and provider timeout boundaries.
+boundary. Reuse the inbound MCP message and provider timeout boundaries.
 Oversized output stops subsequent commands without turning possible remote
 effects into safe-to-retry failures. Annotations conservatively advertise a
 potentially destructive, non-idempotent, open-world mutation.
@@ -208,8 +208,12 @@ In stdio mode:
 - stdout contains MCP protocol frames only;
 - logs and diagnostics use stderr and obey redaction;
 - startup freezes and preflights authority before protocol serving;
-- malformed UTF-8/JSON and frames above the production-owned 2 MiB stdio
-  ceiling produce bounded, redacted handling without echoing input;
+- malformed UTF-8/JSON and frames above the production-owned 32 MiB stdio
+  ceiling produce bounded, redacted handling without echoing input. The
+  ceiling is sized for one compose request carrying the 20 MiB decoded
+  inline-attachment budget as base64 plus JSON framing, body, and headers;
+  SSE and Streamable HTTP request bodies use the same 32 MiB application-owned
+  bound instead of the MCP SDK's smaller default;
 - request cancellation is propagated to application checkpoints;
 - EOF, cancellation, initialization failure, and normal shutdown close all
   constructed resources;
